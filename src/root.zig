@@ -47,6 +47,33 @@ pub const FQLType = union(enum) {
                 allocator.free(fields);
             }
         }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter) !void {
+            try writer.writeByte('{');
+
+            if (self.fields) |fields| {
+                try writer.writeByte(' ');
+
+                for (fields, 0..) |field, i| {
+                    if (i > 0) {
+                        try writer.writeAll(", ");
+                    }
+
+                    switch (field.key) {
+                        inline .identifier, .string => |s| try writer.writeAll(s),
+                        .wildcard => try writer.writeByte('*'),
+                    }
+
+                    try writer.writeAll(": ");
+
+                    try field.type.printCanonical(writer);
+                }
+
+                try writer.writeByte(' ');
+            }
+
+            try writer.writeByte('}');
+        }
     };
 
     pub const Union = struct {
@@ -58,6 +85,12 @@ pub const FQLType = union(enum) {
             allocator.destroy(self.lhs);
             self.rhs.deinit(allocator);
             allocator.destroy(self.rhs);
+        }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter) !void {
+            try self.lhs.printCanonical(writer);
+            try writer.writeAll(" | ");
+            try self.rhs.printCanonical(writer);
         }
     };
 
@@ -76,6 +109,24 @@ pub const FQLType = union(enum) {
 
             allocator.free(self.name);
         }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter) !void {
+            try writer.writeAll(self.name);
+
+            if (self.parameters) |parameters| {
+                try writer.writeByte('<');
+
+                for (parameters, 0..) |parameter, i| {
+                    if (i > 0) {
+                        try writer.writeAll(", ");
+                    }
+
+                    try parameter.printCanonical(writer);
+                }
+
+                try writer.writeByte('>');
+            }
+        }
     };
 
     pub const Tuple = struct {
@@ -90,6 +141,22 @@ pub const FQLType = union(enum) {
 
                 allocator.free(types);
             }
+        }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter) !void {
+            try writer.writeByte('[');
+
+            if (self.types) |types| {
+                for (types, 0..) |fql_type, i| {
+                    if (i > 0) {
+                        try writer.writeAll(", ");
+                    }
+
+                    try fql_type.printCanonical(writer);
+                }
+            }
+
+            try writer.writeByte(']');
         }
     };
 
@@ -132,6 +199,35 @@ pub const FQLType = union(enum) {
             self.return_type.deinit(allocator);
             allocator.destroy(self.return_type);
         }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter) !void {
+            switch (self.parameters) {
+                .long => |long| {
+                    try writer.writeByte('(');
+
+                    if (long.types) |types| {
+                        for (types, 0..) |fql_type, i| {
+                            if (i > 0) {
+                                try writer.writeAll(", ");
+                            }
+
+                            if (i == types.len - 1 and long.variadic) {
+                                try writer.writeAll("...");
+                            }
+
+                            try fql_type.printCanonical(writer);
+                        }
+                    }
+
+                    try writer.writeByte(')');
+                },
+                .short => |s| try s.printCanonical(writer),
+            }
+
+            try writer.writeAll(" => ");
+
+            try self.return_type.printCanonical(writer);
+        }
     };
 
     named: []const u8,
@@ -154,6 +250,31 @@ pub const FQLType = union(enum) {
                 allocator.destroy(optional);
             },
         }
+    }
+
+    pub fn printCanonical(self: @This(), writer: std.io.AnyWriter) std.io.AnyWriter.Error!void {
+        switch (self) {
+            inline .named, .string_literal, .number_literal => |str| try writer.writeAll(str),
+            .optional => |child| {
+                try child.printCanonical(writer);
+                try writer.writeByte('?');
+            },
+            .isolated => |child| {
+                try writer.writeByte('(');
+                try child.printCanonical(writer);
+                try writer.writeByte(')');
+            },
+            inline else => |t| try t.printCanonical(writer),
+        }
+    }
+
+    pub fn toCanonicalString(self: @This(), allocator: std.mem.Allocator) ![]const u8 {
+        var str = std.ArrayList(u8).init(allocator);
+        defer str.deinit();
+
+        try self.printCanonical(str.writer().any());
+
+        return try str.toOwnedSlice();
     }
 
     pub const Parser = struct {
@@ -660,6 +781,11 @@ fn expectParsedTypeEqual(str: []const u8, expected: FQLType) !void {
     defer actual.deinit(testing.allocator);
 
     try testing.expectEqualDeep(expected, actual);
+
+    const canonical_string = try actual.toCanonicalString(testing.allocator);
+    defer testing.allocator.free(canonical_string);
+
+    try testing.expectEqualStrings(str, canonical_string);
 }
 
 test parseType {
@@ -765,6 +891,10 @@ pub const FQLExpression = union(enum) {
                 self.value.deinit(allocator);
                 allocator.destroy(self.value);
             }
+
+            fn multilineCanonical(self: @This()) bool {
+                return self.value.multilineCanonical();
+            }
         };
 
         fields: ?[]const Field = null,
@@ -777,6 +907,53 @@ pub const FQLExpression = union(enum) {
 
                 allocator.free(fields);
             }
+        }
+
+        fn multilineCanonical(self: @This()) bool {
+            return self.fields != null and util.slice.some(self.fields.?, Field.multilineCanonical);
+        }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+            try writer.writeByte('{');
+
+            if (self.fields) |fields| {
+                if (fields.len > 0) {
+                    const is_multiline = fields.len > 1 or util.slice.some(fields, Field.multilineCanonical);
+                    if (is_multiline) {
+                        try writer.writeByte('\n');
+                    } else {
+                        try writer.writeByte(' ');
+                    }
+
+                    for (fields, 0..) |field, i| {
+                        if (is_multiline) {
+                            try writer.writeBytesNTimes(indent_str, level + 1);
+                        } else if (i > 0) {
+                            try writer.writeAll(", ");
+                        }
+
+                        switch (field.key) {
+                            inline else => |k| try writer.writeAll(k),
+                        }
+
+                        try writer.writeAll(": ");
+
+                        try field.value.printCanonical(writer, indent_str, level + @intFromBool(is_multiline));
+
+                        if (is_multiline) {
+                            try writer.writeAll(",\n");
+                        }
+                    }
+
+                    if (is_multiline) {
+                        try writer.writeBytesNTimes(indent_str, level);
+                    } else {
+                        try writer.writeByte(' ');
+                    }
+                }
+            }
+
+            try writer.writeByte('}');
         }
     };
 
@@ -792,6 +969,41 @@ pub const FQLExpression = union(enum) {
 
                 allocator.free(elems);
             }
+        }
+
+        fn multilineCanonical(self: @This()) bool {
+            return self.elements != null and util.slice.some(self.elements.?, FQLExpression.multilineCanonical);
+        }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+            try writer.writeByte(if (self.parens) '(' else '[');
+            if (self.elements) |elems| {
+                if (elems.len > 0) {
+                    const is_multiline = elems.len > 1 or util.slice.some(elems, FQLExpression.multilineCanonical);
+                    if (is_multiline) {
+                        try writer.writeByte('\n');
+                    }
+
+                    for (elems, 0..) |elem, i| {
+                        if (is_multiline) {
+                            try writer.writeBytesNTimes(indent_str, level + 1);
+                        } else if (i > 0) {
+                            try writer.writeAll(", ");
+                        }
+
+                        try elem.printCanonical(writer, indent_str, level + @intFromBool(is_multiline));
+
+                        if (is_multiline) {
+                            try writer.writeAll(",\n");
+                        }
+                    }
+
+                    if (is_multiline) {
+                        try writer.writeBytesNTimes(indent_str, level);
+                    }
+                }
+            }
+            try writer.writeByte(if (self.parens) ')' else ']');
         }
     };
 
@@ -858,6 +1070,30 @@ pub const FQLExpression = union(enum) {
                     else => null,
                 };
             }
+
+            pub fn toString(self: Operator) []const u8 {
+                return switch (self) {
+                    .add => "+",
+                    .subtract => "-",
+                    .multiply => "*",
+                    .divide => "/",
+                    .power => "**",
+                    .modulos => "%",
+                    .equality => "==",
+                    .inequality => "!=",
+                    .less_than => "<",
+                    .less_than_or_equal => "<=",
+                    .greater_than => ">",
+                    .greater_than_or_equal => ">=",
+                    .logical_and => "&&",
+                    .logical_or => "||",
+                    .bitwise_and => "&",
+                    .bitwise_or => "|",
+                    .bitwise_xor => "^",
+                    .null_coalescence => "??",
+                    .isa => "isa",
+                };
+            }
         };
 
         operator: Operator,
@@ -870,6 +1106,18 @@ pub const FQLExpression = union(enum) {
             allocator.destroy(self.lhs);
             allocator.destroy(self.rhs);
         }
+
+        fn multilineCanonical(self: @This()) bool {
+            return self.lhs.multilineCanonical() or self.rhs.multilineCanonical();
+        }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+            try self.lhs.printCanonical(writer, indent_str, level);
+            try writer.writeByte(' ');
+            try writer.writeAll(self.operator.toString());
+            try writer.writeByte(' ');
+            try self.rhs.printCanonical(writer, indent_str, level);
+        }
     };
 
     pub const UnaryOperation = struct {
@@ -877,6 +1125,14 @@ pub const FQLExpression = union(enum) {
             logical_not,
             bitwise_not,
             arithmetic_not,
+
+            pub fn toString(self: Operator) []const u8 {
+                return switch (self) {
+                    .logical_not => "!",
+                    .bitwise_not => "~",
+                    .arithmetic_not => "-",
+                };
+            }
         };
 
         operator: Operator,
@@ -885,6 +1141,15 @@ pub const FQLExpression = union(enum) {
         fn deinit(self: @This(), allocator: std.mem.Allocator) void {
             self.operand.deinit(allocator);
             allocator.destroy(self.operand);
+        }
+
+        fn multilineCanonical(self: @This()) bool {
+            return self.operand.multilineCanonical();
+        }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+            try writer.writeAll(self.operator.toString());
+            try self.operand.printCanonical(writer, indent_str, level);
         }
     };
 
@@ -913,6 +1178,41 @@ pub const FQLExpression = union(enum) {
             self.field.deinit(allocator);
             allocator.destroy(self.value);
         }
+
+        fn multilineCanonical(self: @This()) bool {
+            return self.value.multilineCanonical() or (self.field == .expression and self.field.expression.multilineCanonical());
+        }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+            try self.value.printCanonical(writer, indent_str, level);
+            if (self.optional) {
+                try writer.writeByte('?');
+            }
+
+            switch (self.field) {
+                .identifier => |ident| {
+                    try writer.writeByte('.');
+                    try writer.writeAll(ident);
+                },
+                .expression => |expr| {
+                    if (self.optional) {
+                        try writer.writeByte('.');
+                    }
+
+                    try writer.writeByte('[');
+                    if (expr.multilineCanonical()) {
+                        try writer.writeByte('\n');
+                        try writer.writeBytesNTimes(indent_str, level + 1);
+                        try expr.printCanonical(writer, indent_str, level + 1);
+                        try writer.writeByte('\n');
+                        try writer.writeBytesNTimes(indent_str, level);
+                    } else {
+                        try expr.printCanonical(writer, indent_str, level);
+                    }
+                    try writer.writeByte(']');
+                },
+            }
+        }
     };
 
     pub const Invocation = struct {
@@ -931,6 +1231,41 @@ pub const FQLExpression = union(enum) {
             self.function.deinit(allocator);
             allocator.destroy(self.function);
         }
+
+        fn multilineCanonical(self: @This()) bool {
+            return self.function.multilineCanonical() or (self.arguments != null and util.slice.some(self.arguments.?, FQLExpression.multilineCanonical));
+        }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+            try self.function.printCanonical(writer, indent_str, level);
+            try writer.writeByte('(');
+            if (self.arguments) |args| {
+                if (args.len > 0) {
+                    const is_multiline = util.slice.some(args, FQLExpression.multilineCanonical);
+                    if (is_multiline) {
+                        try writer.writeByte('\n');
+                    }
+
+                    for (args, 0..) |arg, i| {
+                        if (is_multiline) {
+                            try writer.writeBytesNTimes(indent_str, level + 1);
+                        } else if (i > 0) {
+                            try writer.writeAll(", ");
+                        }
+
+                        try arg.printCanonical(writer, indent_str, level + @intFromBool(is_multiline));
+                        if (is_multiline) {
+                            try writer.writeAll(",\n");
+                        }
+                    }
+
+                    if (is_multiline) {
+                        try writer.writeBytesNTimes(indent_str, level);
+                    }
+                }
+            }
+            try writer.writeByte(')');
+        }
     };
 
     pub const VariableDeclaration = struct {
@@ -946,6 +1281,21 @@ pub const FQLExpression = union(enum) {
             allocator.free(self.name);
             self.value.deinit(allocator);
             allocator.destroy(self.value);
+        }
+
+        fn multilineCanonical(self: @This()) bool {
+            return self.value.multilineCanonical();
+        }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+            try writer.writeAll("let ");
+            try writer.writeAll(self.name);
+            if (self.type) |fql_type| {
+                try writer.writeAll(": ");
+                try fql_type.printCanonical(writer);
+            }
+            try writer.writeAll(" = ");
+            try self.value.printCanonical(writer, indent_str, level);
         }
     };
 
@@ -964,6 +1314,30 @@ pub const FQLExpression = union(enum) {
             allocator.destroy(self.body);
             self.condition.deinit(allocator);
             allocator.destroy(self.condition);
+        }
+
+        fn multilineCanonical(self: @This()) bool {
+            return self.condition.multilineCanonical() or self.body.multilineCanonical() or (self.@"else" != null and self.@"else".?.multilineCanonical());
+        }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+            try writer.writeAll("if (");
+            if (self.condition.multilineCanonical()) {
+                try writer.writeByte('\n');
+                try writer.writeBytesNTimes(indent_str, level + 1);
+                try self.condition.printCanonical(writer, indent_str, level + 1);
+                try writer.writeByte('\n');
+                try writer.writeBytesNTimes(indent_str, level);
+            } else {
+                try self.condition.printCanonical(writer, indent_str, level);
+            }
+
+            try writer.writeAll(") ");
+            try self.body.printCanonical(writer, indent_str, level);
+            if (self.@"else") |expr| {
+                try writer.writeAll(" else ");
+                try expr.printCanonical(writer, indent_str, level);
+            }
         }
     };
 
@@ -999,6 +1373,39 @@ pub const FQLExpression = union(enum) {
             self.body.deinit(allocator);
             allocator.destroy(self.body);
         }
+
+        fn multilineCanonical(self: @This()) bool {
+            return self.body.multilineCanonical();
+        }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+            switch (self.parameters) {
+                .long => |l| {
+                    try writer.writeByte('(');
+
+                    if (l.parameters) |params| {
+                        for (params, 0..) |param, i| {
+                            if (i > 0) {
+                                try writer.writeAll(", ");
+                            }
+
+                            if (l.variadic and i == params.len - 1) {
+                                try writer.writeAll("...");
+                            }
+
+                            try writer.writeAll(param);
+                        }
+                    }
+
+                    try writer.writeByte(')');
+                },
+                .short => |s| try writer.writeAll(s),
+            }
+
+            try writer.writeAll(" => ");
+
+            try self.body.printCanonical(writer, indent_str, level);
+        }
     };
 
     pub const Projection = struct {
@@ -1019,6 +1426,10 @@ pub const FQLExpression = union(enum) {
                     },
                 }
             }
+
+            fn multilineCanonical(self: @This()) bool {
+                return self == .long and self.long.value.multilineCanonical();
+            }
         };
 
         expression: *const FQLExpression,
@@ -1035,6 +1446,56 @@ pub const FQLExpression = union(enum) {
 
             self.expression.deinit(allocator);
             allocator.destroy(self.expression);
+        }
+
+        fn multilineCanonical(self: @This()) bool {
+            return self.expression.multilineCanonical() or (self.fields != null and util.slice.some(self.fields.?, Field.multilineCanonical));
+        }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+            try self.expression.printCanonical(writer, indent_str, level);
+
+            try writer.writeAll(" {");
+
+            if (self.fields) |fields| {
+                if (fields.len > 0) {
+                    const is_multiline = fields.len > 1 or util.slice.some(fields, Field.multilineCanonical);
+                    if (is_multiline) {
+                        try writer.writeByte('\n');
+                    } else {
+                        try writer.writeByte(' ');
+                    }
+
+                    for (fields, 0..) |field, i| {
+                        if (is_multiline) {
+                            try writer.writeBytesNTimes(indent_str, level + 1);
+                        } else if (i > 0) {
+                            try writer.writeAll(", ");
+                        }
+
+                        switch (field) {
+                            .short => |s| try writer.writeAll(s),
+                            .long => |l| {
+                                try writer.writeAll(l.key);
+                                try writer.writeAll(": ");
+                                try l.value.printCanonical(writer, indent_str, level + 1);
+                            },
+                        }
+
+                        if (is_multiline) {
+                            try writer.writeAll(",\n");
+                        }
+                    }
+
+                    if (is_multiline) {
+                        try writer.writeBytesNTimes(indent_str, level);
+                    } else {
+                        try writer.writeByte(' ');
+                    }
+                }
+            }
+
+            try writer.writeAll("}");
         }
     };
 
@@ -1090,6 +1551,74 @@ pub const FQLExpression = union(enum) {
             },
             .null, .boolean_literal => {},
         }
+    }
+
+    fn multilineCanonical(self: FQLExpression) bool {
+        return switch (self) {
+            .identifier, .number_literal, .string_literal, .null, .boolean_literal => false,
+            inline .isolated, .non_null_assertion => |child| child.multilineCanonical(),
+            .anonymous_field_access => |key| switch (key) {
+                .identifier => false,
+                .expression => |expr| expr.multilineCanonical(),
+            },
+            .block_scope => |exprs| exprs.len > 0,
+            inline else => |e| e.multilineCanonical(),
+        };
+    }
+
+    pub fn printCanonical(self: FQLExpression, writer: std.io.AnyWriter, indent_str: []const u8, level: usize) std.io.AnyWriter.Error!void {
+        switch (self) {
+            inline .identifier, .number_literal, .string_literal => |s| try writer.writeAll(s),
+            .null => try writer.writeAll("null"),
+            .boolean_literal => |b| try writer.writeAll(if (b) "true" else "false"),
+            .isolated => |child| {
+                try writer.writeByte('(');
+                try child.printCanonical(writer, indent_str, level);
+                try writer.writeByte(')');
+            },
+            .non_null_assertion => |child| {
+                try child.printCanonical(writer, indent_str, level);
+                try writer.writeByte('!');
+            },
+            .anonymous_field_access => |key| {
+                try writer.writeByte('.');
+                switch (key) {
+                    .identifier => |ident| try writer.writeAll(ident),
+                    .expression => |expr| {
+                        try writer.writeByte('[');
+                        try expr.printCanonical(writer, indent_str, level);
+                        try writer.writeByte(']');
+                    },
+                }
+            },
+            .block_scope => |exprs| {
+                try writer.writeByte('{');
+                if (exprs.len > 0) {
+                    try writer.writeByte('\n');
+
+                    for (exprs) |expr| {
+                        try writer.writeBytesNTimes(indent_str, level + 1);
+
+                        try expr.printCanonical(writer, indent_str, level + 1);
+                        try writer.writeByte('\n');
+                    }
+
+                    try writer.writeBytesNTimes(indent_str, level);
+                }
+
+                try writer.writeAll("}");
+            },
+            inline else => |e| try e.printCanonical(writer, indent_str, level),
+        }
+    }
+
+    pub fn toCanonicalString(self: @This(), allocator: std.mem.Allocator) ![]const u8 {
+        var str = std.ArrayList(u8).init(allocator);
+        defer str.deinit();
+
+        try self.printCanonical(str.writer().any(), "    ", 0);
+
+        return try str.toOwnedSlice();
     }
 
     fn isIdentifier(self: FQLExpression) bool {
@@ -2148,6 +2677,11 @@ fn expectParsedExprEqual(str: []const u8, expected: FQLExpression) !void {
     // std.debug.print("actual: {any}\n", .{actual});
 
     try testing.expectEqualDeep(expected, actual);
+
+    const canonical_string = try actual.toCanonicalString(testing.allocator);
+    defer testing.allocator.free(canonical_string);
+
+    try testing.expectEqualStrings(str, canonical_string);
 }
 
 test parseExpression {
@@ -2495,5 +3029,14 @@ pub const QueryTree = struct {
             .allocator = allocator,
             .expressions = try exprs.toOwnedSlice(),
         };
+    }
+
+    pub fn printCanonical(self: @This(), writer: std.io.AnyWriter) !void {
+        if (self.expressions) |exprs| {
+            for (exprs) |expr| {
+                try expr.printCanonical(writer, "    ", 0);
+                try writer.writeByte('\n');
+            }
+        }
     }
 };
