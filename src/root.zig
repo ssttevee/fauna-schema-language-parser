@@ -390,6 +390,10 @@ pub const FQLType = union(enum) {
             }
 
             pub fn pushToken(self: *@This(), allocator: std.mem.Allocator, token: tokenizer.Token) !PushResult {
+                if (token == .comment_block or token == .comment_line or token == .eol) {
+                    return .{};
+                }
+
                 switch (self.state) {
                     .start => switch (token) {
                         .string => |str| {
@@ -748,10 +752,6 @@ pub const FQLType = union(enum) {
         while (true) {
             const token = try it.nextToken(allocator);
             defer token.deinit(allocator);
-
-            if (token == .comment_line or token == .comment_block) {
-                continue;
-            }
 
             // std.debug.print("pushing token: {any}\n", .{token});
             const result = try parser.push(token);
@@ -1843,6 +1843,10 @@ pub const FQLExpression = union(enum) {
             }
 
             pub fn pushToken(self: *@This(), allocator: std.mem.Allocator, token: tokenizer.Token) !PushResult {
+                if (token == .comment_block or token == .comment_line or (self.state != .end and token == .eol)) {
+                    return .{};
+                }
+
                 switch (self.state) {
                     .empty => switch (token) {
                         // number literal
@@ -1930,6 +1934,13 @@ pub const FQLExpression = union(enum) {
                                             return .{};
                                         }
                                     }
+                                } else if (parent.state == .block_scope) {
+                                    if (token == .rbrace) {
+                                        defer allocator.destroy(parent);
+                                        self.* = parent.*;
+
+                                        return .{ .save = token };
+                                    }
                                 }
                             }
 
@@ -1949,6 +1960,9 @@ pub const FQLExpression = union(enum) {
                                 return .{ .save = token };
                             },
                         }
+                    },
+                    .block_scope => |*block_scope| {
+                        self.finalizeExpr(.{ .block_scope = try block_scope.toOwnedSlice(allocator) });
                     },
                     .variable_declaration => |*variable_declaration| {
                         if (variable_declaration.name == null) {
@@ -2485,10 +2499,7 @@ pub const FQLExpression = union(enum) {
                                     try block_scope.append(allocator, expr);
 
                                     switch (token) {
-                                        .rbrace => {
-                                            parent.finalizeExpr(.{ .block_scope = try block_scope.toOwnedSlice(allocator) });
-                                            return .{};
-                                        },
+                                        .rbrace => {},
                                         else => {
                                             try parent.startChildState(allocator);
                                         },
@@ -2552,12 +2563,12 @@ pub const FQLExpression = union(enum) {
                             }
 
                             // ensure token is not consumed at this point
-                            return .{ .save = token };
+                            return .{ .save = if (token == .semi or token == .eol) null else token };
                         }
 
                         self.* = .{};
 
-                        return .{ .save = token, .expr = expr };
+                        return .{ .save = if (token == .semi or token == .eol) null else token, .expr = expr };
                     },
                     else => {
                         if (self.state == .long_function and self.state.long_function.variadic_state != null) {
@@ -2642,10 +2653,6 @@ pub const FQLExpression = union(enum) {
         while (true) {
             const token = try it.nextToken(allocator);
             defer token.deinit(allocator);
-
-            if (token == .comment_line or token == .comment_block) {
-                continue;
-            }
 
             // std.debug.print("pushing token: {any}\n", .{token});
             const result = try parser.push(token);

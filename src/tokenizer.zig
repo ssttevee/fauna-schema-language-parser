@@ -3,54 +3,41 @@ const testing = std.testing;
 
 const util = @import("util.zig");
 
-fn isWordChar(char: u8) bool {
-    return ('a' <= char and char <= 'z') or ('A' <= char and char <= 'Z') or ('0' <= char and char <= '9');
+/// https://docs.fauna.com/fauna/current/reference/fql_reference/lexical#whitespace
+fn isWhitespace(char: u8) bool {
+    // character tab            : u+0009
+    // line tab                 : u+000B
+    // form feed                : u+000C
+    // space                    : u+0020
+    // no-break space           : u+00A0
+    // zero-width no-break space: u+feff (unhandled)
+    return char == '\x09' or char == '\x0B' or char == '\x0C' or char == '\x20' or char == '\xA0';
+}
+
+/// https://docs.fauna.com/fauna/current/reference/fql_reference/lexical#line-terminators
+fn isLineTerminator(char: u8) bool {
+    // line-feed          : u+000A
+    // carriage return    : u+000D
+    // line separator     : u+2028 (unhandled)
+    // paragraph separator: u+2029 (unhandled)
+    return char == '\x0A' or char == '\x0D';
 }
 
 fn isIdentifierChar(char: u8, index: usize) bool {
     return char == '_' or ('a' <= char and char <= 'z') or ('A' <= char and char <= 'Z') or (index > 0 and '0' <= char and char <= '9');
 }
 
-const isNotIdentifierChar = util.predicateNegation(isIdentifierChar);
-
 fn isQuote(char: u8) bool {
     return char == '"' or char == '\'';
 }
 
 fn isNumberChar(char: u8, index: usize) bool {
-    return (('0' <= char and char <= '9') or ('a' <= char and char <= 'f') or ('A' <= char and char <= 'F') or char == '-') or (index == 1 and (char == 'b' or char == 'o' or char == 'x')) or (index > 0 and (char == '.' or char == '_' or char == 'e'));
-}
-
-fn isString(s: []const u8) bool {
-    if (s.len < 1) {
-        return false;
-    }
-
-    return isQuote(s[0]);
-}
-
-fn isCommentLine(s: []const u8) bool {
-    if (s.len < 2) {
-        return false;
-    }
-
-    return s[0] == '/' and s[1] == '/';
-}
-
-fn isCommentBlock(s: []const u8) bool {
-    if (s.len < 2) {
-        return false;
-    }
-
-    return s[0] == '/' and s[1] == '*';
-}
-
-fn isComment(s: []const u8) bool {
-    return isCommentLine(s) or isCommentBlock(s);
+    return (('0' <= char and char <= '9') or char == '-') or (index == 1 and (char == 'b' or char == 'o' or char == 'x')) or (index > 0 and (char == '.' or char == '_' or char == 'e')) or (index > 2 and (('a' <= char and char <= 'f') or ('A' <= char and char <= 'F')));
 }
 
 pub const Token = union(enum) {
     eof,
+    eol,
 
     ampersand,
     ampersand2,
@@ -86,6 +73,7 @@ pub const Token = union(enum) {
     rbrace,
     rbracket,
     rparen,
+    semi,
     slash,
     tilde,
 
@@ -124,12 +112,10 @@ pub const Token = union(enum) {
 const WordPrefix = union(enum) {
     none,
     at,
-    number: u8,
 
-    fn fromU8(c: u8) WordPrefix {
+    fn fromChar(c: u8) WordPrefix {
         return switch (c) {
             '@' => .at,
-            '0'...'9', '-' => .{ .number = c },
             else => .none,
         };
     }
@@ -146,16 +132,319 @@ const WordPrefix = union(enum) {
         return switch (self) {
             .none => "",
             .at => "@",
-            .number => |c| &.{c},
         };
     }
 };
 
+buf_start: usize = 0,
+buf_end: usize = 0,
+buf: [2048]u8 = undefined,
+saved_token: ?Token = null,
+is_eof: bool = false,
+
+const Tokenizer = @This();
+
+pub fn write(self: *Tokenizer, bytes: []const u8) !usize {
+    if (self.buf_start > 0 and self.buf.len - self.buf_end < bytes.len) {
+        const new_end = self.buf_end - self.buf_start;
+        std.mem.copyForwards(u8, self.buf[0..new_end], self.buf[self.buf_end..]);
+        self.buf_end = new_end;
+        self.buf_start = 0;
+    }
+
+    const dst = self.buf[self.buf_end..];
+    if (dst.len == 0) {
+        return error.NoSpaceLeft;
+    }
+
+    if (dst.len < bytes.len) {
+        @memcpy(dst, bytes[0..dst.len]);
+    } else {
+        @memcpy(dst[0..bytes.len], bytes);
+    }
+
+    const written = @min(dst.len, bytes.len);
+    self.buf_end += written;
+
+    return written;
+}
+
+pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
+    var chars: []const u8 = self.buf[self.buf_start..self.buf_end];
+
+    while (chars.len > 0 and isWhitespace(chars[0])) {
+        chars.ptr += 1;
+        chars.len -= 1;
+        self.buf_start += 1;
+    }
+
+    if (chars.len == 0) {
+        if (self.is_eof) {
+            return null;
+        } else {
+            return error.NeedMoreData;
+        }
+    }
+
+    if (isLineTerminator(chars[0])) {
+        if (util.slice.indexOfNonePosFn(chars, 1, isLineTerminator)) |pos| {
+            self.buf_start += pos;
+            return .eol;
+        } else {
+            self.buf_start += 1;
+            return .eol;
+        }
+    }
+
+    if (@as(?std.meta.Tuple(&.{ Token, usize }), switch (chars[0]) {
+        '*' => blk: {
+            if (chars.len > 1 and chars[1] == '*') {
+                break :blk .{ .asterisk2, 2 };
+            }
+
+            if (!self.is_eof) {
+                return error.NeedMoreData;
+            }
+
+            break :blk .{ .asterisk, 1 };
+        },
+        '&' => blk: {
+            if (chars.len > 1 and chars[1] == '&') {
+                break :blk .{ .ampersand2, 2 };
+            }
+
+            if (!self.is_eof) {
+                return error.NeedMoreData;
+            }
+
+            break :blk .{ .ampersand, 1 };
+        },
+        '!' => blk: {
+            if (chars.len > 1 and chars[1] == '=') {
+                break :blk .{ .bang_equal, 2 };
+            }
+
+            if (!self.is_eof) {
+                return error.NeedMoreData;
+            }
+
+            break :blk .{ .bang, 1 };
+        },
+        '^' => .{ .caret, 1 },
+        ':' => .{ .colon, 1 },
+        ';' => .{ .semi, 1 },
+        ',' => .{ .comma, 1 },
+        '.' => blk: {
+            if (chars.len > 2 and chars[1] == '.' and chars[2] == '.') {
+                break :blk .{ .dot3, 3 };
+            }
+
+            if (!self.is_eof) {
+                return error.NeedMoreData;
+            }
+
+            break :blk .{ .dot, 1 };
+        },
+        '<' => blk: {
+            if (chars.len > 1 and chars[1] == '=') {
+                break :blk .{ .larrow_equal, 2 };
+            }
+
+            if (!self.is_eof) {
+                return error.NeedMoreData;
+            }
+
+            break :blk .{ .larrow, 1 };
+        },
+        '{' => .{ .lbrace, 1 },
+        '[' => .{ .lbracket, 1 },
+        '(' => .{ .lparen, 1 },
+        '%' => .{ .percent, 1 },
+        '|' => blk: {
+            if (chars.len > 1 and chars[1] == '|') {
+                break :blk .{ .pipe2, 2 };
+            }
+
+            if (!self.is_eof) {
+                return error.NeedMoreData;
+            }
+
+            break :blk .{ .pipe, 1 };
+        },
+        '+' => .{ .plus, 1 },
+        '?' => blk: {
+            if (chars.len > 1) {
+                switch (chars[1]) {
+                    '.' => break :blk .{ .question_dot, 2 },
+                    '?' => break :blk .{ .question2, 2 },
+                    else => {},
+                }
+            }
+
+            if (!self.is_eof) {
+                return error.NeedMoreData;
+            }
+
+            break :blk .{ .question, 1 };
+        },
+        '>' => blk: {
+            if (chars.len > 1 and chars[1] == '=') {
+                break :blk .{ .rarrow_equal, 2 };
+            }
+
+            if (!self.is_eof) {
+                return error.NeedMoreData;
+            }
+
+            break :blk .{ .rarrow, 1 };
+        },
+        '}' => .{ .rbrace, 1 },
+        ']' => .{ .rbracket, 1 },
+        ')' => .{ .rparen, 1 },
+        '/' => blk: {
+            if (chars.len > 1 and (chars[1] == '/' or chars[1] == '*')) {
+                break :blk null;
+            }
+
+            if (!self.is_eof) {
+                return error.NeedMoreData;
+            }
+
+            break :blk .{ .slash, 1 };
+        },
+        '=' => blk: {
+            if (chars.len >= 2) {
+                switch (chars[1]) {
+                    '>' => break :blk .{ .equal_rarrow, 2 },
+                    '=' => break :blk .{ .equal2, 2 },
+                    else => {},
+                }
+            }
+
+            if (!self.is_eof) {
+                return error.NeedMoreData;
+            }
+
+            break :blk .{ .equal, 1 };
+        },
+        '-' => blk: {
+            if (chars.len >= 2) {
+                switch (chars[1]) {
+                    '>' => break :blk .{ .minus_rarrow, 2 },
+                    '0'...'9' => break :blk null,
+                    else => {},
+                }
+            }
+
+            if (!self.is_eof) {
+                return error.NeedMoreData;
+            }
+
+            break :blk .{ .minus, 1 };
+        },
+        '~' => .{ .tilde, 1 },
+        else => null,
+    })) |match| {
+        const token, const len = match;
+        self.buf_start += len;
+        return token;
+    }
+
+    if (chars.len >= 2 and isQuote(chars[0])) {
+        const eol_pos = util.slice.indexOfPosFn(chars, 1, isLineTerminator);
+
+        var start: usize = 1;
+        while (std.mem.indexOfScalarPos(u8, chars, start, chars[0])) |pos| {
+            if (pos > 1 and chars[pos - 1] == '\\') {
+                // this quote is escaped
+                start = pos + 1;
+                continue;
+            }
+
+            // found an matching unescaped quote
+            if (eol_pos == null or eol_pos.? > pos) {
+                self.buf_start += pos + 1;
+                return .{ .string = try allocator.dupe(u8, chars[0 .. pos + 1]) };
+            }
+        } else if (eol_pos == null) {
+            // reach end of buf without finding a matching quote or an eol
+            return error.NeedMoreData;
+        }
+    }
+
+    if (chars.len >= 3 and chars[0] == '/' and chars[1] == '/') {
+        const pos = util.slice.indexOfPosFn(chars, 2, isLineTerminator);
+        if (pos == null) {
+            if (!self.is_eof) {
+                return error.NeedMoreData;
+            }
+
+            self.buf_start = self.buf_end;
+            return .{ .comment_line = try allocator.dupe(u8, chars) };
+        }
+
+        self.buf_start += pos.? + 1;
+        return .{ .comment_line = try allocator.dupe(u8, chars[0..pos.?]) };
+    }
+
+    if (chars.len >= 4 and chars[0] == '/' and chars[1] == '*') {
+        if (std.mem.indexOfPos(u8, chars, 2, "*/")) |pos| {
+            self.buf_start += pos + 2;
+            return .{ .comment_block = try allocator.dupe(u8, chars[0 .. pos + 2]) };
+        } else {
+            return error.NeedMoreData;
+        }
+    }
+
+    if (isNumberChar(chars[0], 0)) {
+        // very loosely tokenize the number, it's okay if it's not valid
+        if (util.slice.indexOfNonePosFn(chars, 1, isIdentifierChar)) |dot_pos| {
+            if (chars[dot_pos] == '.') {
+                if (util.slice.indexOfNonePosFn(chars, dot_pos + 1, isIdentifierChar)) |index| {
+                    chars.len = index;
+                }
+            } else {
+                chars.len = dot_pos;
+            }
+        }
+
+        self.buf_start += chars.len;
+        return .{ .number = try allocator.dupe(u8, chars) };
+    }
+
+    const prefix = WordPrefix.fromChar(chars[0]);
+    if (prefix != .none) {
+        chars.ptr += prefix.len();
+        chars.len -= prefix.len();
+        self.buf_start += prefix.len();
+    }
+
+    if (util.slice.indexOfNoneFn(chars, isIdentifierChar)) |index| {
+        if (index == 0) {
+            std.debug.panic("unexpected non-identifier character: '{d}' \"{s}\"", .{ chars[0], chars });
+        }
+
+        chars.len = index;
+    }
+
+    if (chars.len > 0) {
+        if (prefix == .at) {
+            self.buf_start += chars.len;
+            return .{ .annotation = try allocator.dupe(u8, chars) };
+        }
+
+        self.buf_start += chars.len;
+        return .{ .word = try allocator.dupe(u8, chars) };
+    }
+
+    std.log.err("found unexpected token: {d} \"{s}{s}\"", .{ chars.len + prefix.len(), prefix.toString(), chars });
+
+    return error.UnexpectedToken;
+}
+
 pub const TokenIterator = struct {
     reader: std.io.AnyReader,
-    buf_start: usize = 0,
-    buf_end: usize = 0,
-    buf: [64]u8 = undefined,
+    tokenizer: Tokenizer = .{},
     saved_token: ?Token = null,
 
     pub fn init(reader: std.io.AnyReader) TokenIterator {
@@ -166,47 +455,6 @@ pub const TokenIterator = struct {
         if (self.saved_token) |token| {
             token.deinit(allocator);
         }
-    }
-
-    fn nextByte(self: *TokenIterator) !u8 {
-        if (self.buf_start < self.buf_end) {
-            defer self.buf_start += 1;
-
-            return self.buf[self.buf_start];
-        }
-
-        return self.reader.readByte();
-    }
-
-    fn shiftBuf(self: *TokenIterator) void {
-        if (self.buf_start) {
-            return;
-        }
-
-        std.mem.copyForwards(u8, self.buf, self.buf[self.buf_start..self.buf_end]);
-        self.buf_end -= self.buf_start;
-        self.buf_start = 0;
-    }
-
-    fn saveBytes(self: *TokenIterator, bytes: []const u8) void {
-        if (bytes.len == 0) {
-            return;
-        }
-
-        if (self.buf_start < self.buf_end) {
-            if (bytes.len > self.buf_start) {
-                std.mem.copyForwards(u8, self.buf[bytes.len..], self.buf[self.buf_start..self.buf_end]);
-            } else if (bytes.len < self.buf_start) {
-                std.mem.copyBackwards(u8, self.buf[bytes.len..], self.buf[self.buf_start..self.buf_end]);
-            } else {
-                // the existing bytes are already in the right place
-            }
-        }
-
-        std.mem.copyForwards(u8, self.buf[0..], bytes);
-
-        self.buf_end = self.buf_end - self.buf_start + bytes.len;
-        self.buf_start = 0;
     }
 
     pub fn saveToken(self: *TokenIterator, token: ?Token) void {
@@ -222,260 +470,39 @@ pub const TokenIterator = struct {
         return .eof;
     }
 
-    pub fn next(self: *TokenIterator, allocator: std.mem.Allocator) !?Token {
+    fn dirtyNext(self: *TokenIterator, allocator: std.mem.Allocator) !?Token {
         if (self.saved_token) |token| {
-            defer self.saved_token = null;
-
+            self.saved_token = null;
             if (token == .eof) {
                 return null;
             }
-
             return token;
         }
 
-        var arr = std.ArrayList(u8).init(allocator);
-        defer arr.deinit();
+        return self.tokenizer.next(allocator) catch |err| {
+            if (err == error.NeedMoreData) {
+                var buf: [@typeInfo(std.meta.FieldType(Tokenizer, .buf)).Array.len]u8 = undefined;
 
-        while (true) {
-            const char = self.nextByte() catch |err| {
-                if (err == error.EndOfStream) {
-                    // std.debug.print("breaking 1\n", .{});
-                    break;
-                }
-
-                return err;
-            };
-
-            // std.debug.print("current: {d} \"{s}\" '{c}'\n", .{ arr.items.len, arr.items, char });
-            if (isCommentBlock(arr.items)) {
-                try arr.append(char);
-
-                if (arr.items.len >= 4 and arr.items[arr.items.len - 1] == '/' and arr.items[arr.items.len - 2] == '*') {
-                    break;
-                }
-            } else if (isComment(arr.items)) {
-                if (char == '\n') {
-                    break;
-                }
-
-                try arr.append(char);
-            } else {
-                switch (char) {
-                    ' ' => if (arr.items.len > 0) {
-                        if (isString(arr.items)) {
-                            try arr.append(char);
-                        } else {
-                            self.saveBytes(" ");
-                            // std.debug.print("breaking 2\n", .{});
-                            break;
-                        }
-                    },
-                    ';' => if (isString(arr.items)) {
-                        try arr.append(char);
-                    } else if (arr.items.len > 0) {
-                        // std.debug.print("breaking 3\n", .{});
-                        break;
-                    },
-                    '\n', '\r' => if (arr.items.len > 0) {
-                        // std.debug.print("breaking 4\n", .{});
-                        break;
-                    },
-                    '"', '\'' => {
-                        try arr.append(char);
-                        if (arr.items.len >= 2 and arr.items[0] == char) {
-                            if (arr.items[arr.items.len - 1] != '\\') {
-                                // std.debug.print("breaking 5\n", .{});
-                                break;
-                            }
-                        }
-                    },
-                    else => {
-                        try arr.append(char);
-                    },
-                }
-            }
-        }
-
-        // std.debug.print("final: {d} \"{s}\"\n", .{ arr.items.len, arr.items });
-
-        if (arr.items.len == 0) {
-            return null;
-        }
-
-        if (@as(?std.meta.Tuple(&.{ Token, usize }), switch (arr.items[0]) {
-            '*' => blk: {
-                if (arr.items.len > 1 and arr.items[1] == '*') {
-                    break :blk .{ .asterisk2, 2 };
-                }
-
-                break :blk .{ .asterisk, 1 };
-            },
-            '&' => blk: {
-                if (arr.items.len > 1 and arr.items[1] == '&') {
-                    break :blk .{ .ampersand2, 2 };
-                }
-
-                break :blk .{ .ampersand, 1 };
-            },
-            '!' => blk: {
-                if (arr.items.len > 1 and arr.items[1] == '=') {
-                    break :blk .{ .bang_equal, 2 };
-                }
-
-                break :blk .{ .bang, 1 };
-            },
-            '^' => .{ .caret, 1 },
-            ':' => .{ .colon, 1 },
-            ',' => .{ .comma, 1 },
-            '.' => blk: {
-                if (arr.items.len > 2 and arr.items[1] == '.' and arr.items[2] == '.') {
-                    break :blk .{ .dot3, 3 };
-                }
-
-                break :blk .{ .dot, 1 };
-            },
-            '<' => blk: {
-                if (arr.items.len > 1 and arr.items[1] == '=') {
-                    break :blk .{ .larrow_equal, 2 };
-                }
-
-                break :blk .{ .larrow, 1 };
-            },
-            '{' => .{ .lbrace, 1 },
-            '[' => .{ .lbracket, 1 },
-            '(' => .{ .lparen, 1 },
-            '%' => .{ .percent, 1 },
-            '|' => blk: {
-                if (arr.items.len > 1 and arr.items[1] == '|') {
-                    break :blk .{ .pipe2, 2 };
-                }
-
-                break :blk .{ .pipe, 1 };
-            },
-            '+' => .{ .plus, 1 },
-            '?' => blk: {
-                if (arr.items.len > 1) {
-                    switch (arr.items[1]) {
-                        '.' => break :blk .{ .question_dot, 2 },
-                        '?' => break :blk .{ .question2, 2 },
-                        else => {},
-                    }
-                }
-
-                break :blk .{ .question, 1 };
-            },
-            '>' => blk: {
-                if (arr.items.len > 1 and arr.items[1] == '=') {
-                    break :blk .{ .rarrow_equal, 2 };
-                }
-
-                break :blk .{ .rarrow, 1 };
-            },
-            '}' => .{ .rbrace, 1 },
-            ']' => .{ .rbracket, 1 },
-            ')' => .{ .rparen, 1 },
-            '/' => blk: {
-                if (isComment(arr.items)) {
-                    break :blk null;
-                }
-
-                break :blk .{ .slash, 1 };
-            },
-            '=' => blk: {
-                if (arr.items.len >= 2) {
-                    switch (arr.items[1]) {
-                        '>' => break :blk .{ .equal_rarrow, 2 },
-                        '=' => break :blk .{ .equal2, 2 },
-                        else => {},
-                    }
-                }
-
-                break :blk .{ .equal, 1 };
-            },
-            '-' => blk: {
-                if (arr.items.len >= 2) {
-                    switch (arr.items[1]) {
-                        '>' => break :blk .{ .minus_rarrow, 2 },
-                        '0'...'9' => break :blk null,
-                        else => {},
-                    }
-                }
-
-                break :blk .{ .minus, 1 };
-            },
-            '~' => .{ .tilde, 1 },
-            else => null,
-        })) |match| {
-            const token, const len = match;
-            self.saveBytes(arr.items[len..]);
-            return token;
-        }
-
-        if (arr.items.len >= 2 and isQuote(arr.items[0]) and arr.items[0] == arr.items[arr.items.len - 1]) {
-            return .{ .string = try allocator.dupe(u8, arr.items) };
-        }
-
-        if (isCommentLine(arr.items)) {
-            return .{ .comment_line = try allocator.dupe(u8, arr.items) };
-        }
-
-        if (isCommentBlock(arr.items)) {
-            return .{ .comment_block = try allocator.dupe(u8, arr.items) };
-        }
-
-        const prefix = WordPrefix.fromU8(arr.items[0]);
-        if (prefix == .number) {
-            // very loosely tokenize the number, it's okay if it's not valid
-            if (util.slice.indexOfPosFn(arr.items, 1, isNotIdentifierChar)) |dot_pos| {
-                if (arr.items[dot_pos] == '.') {
-                    if (util.slice.indexOfPosFn(arr.items, dot_pos + 1, isNotIdentifierChar)) |index| {
-                        self.saveBytes(arr.items[index..]);
-                        arr.items.len = index;
-                    }
+                const n = try self.reader.read(buf[0 .. self.tokenizer.buf.len - self.tokenizer.buf_end + self.tokenizer.buf_start]);
+                if (n == 0) {
+                    self.tokenizer.is_eof = true;
                 } else {
-                    self.saveBytes(arr.items[dot_pos..]);
-                    arr.items.len = dot_pos;
-                }
-            }
-
-            return .{ .number = try arr.toOwnedSlice() };
-        }
-
-        if (prefix != .none) {
-            _ = arr.orderedRemove(0);
-        }
-
-        const word = blk: {
-            if (util.slice.indexOfFn(arr.items, isNotIdentifierChar)) |index| {
-                if (index == 0) {
-                    break :blk "";
+                    _ = self.tokenizer.write(buf[0..n]) catch unreachable;
                 }
 
-                self.saveBytes(arr.items[index..]);
-                arr.items.len = index;
+                return self.tokenizer.next(allocator);
             }
 
-            break :blk arr.items;
+            return err;
         };
+    }
 
-        if (word.len > 0) {
-            if (prefix == .at) {
-                return .{ .annotation = try arr.toOwnedSlice() };
-            }
-
-            // std.debug.print("emitting word: {d} \"{s}\"\n", .{ arr.items.len, arr.items });
-
-            return .{ .word = try arr.toOwnedSlice() };
+    pub fn next(self: *TokenIterator, allocator: std.mem.Allocator) !?Token {
+        if (try self.dirtyNext(allocator)) |token| {
+            return token;
         }
 
-        std.log.err("found unexpected token: {d} \"{s}{s}\"", .{ arr.items.len + prefix.len(), prefix.toString(), arr.items });
-
-        self.saveBytes(arr.items);
-        if (prefix != .none) {
-            self.saveBytes(prefix.toString());
-        }
-
-        return error.UnexpectedToken;
+        return null;
     }
 };
 
@@ -587,6 +614,7 @@ test "read token" {
         var it = TokenIterator.init(stream.reader().any());
         try expectNextTokenEqualDeep(&it, .{ .comment_line = "// Single-line comments start with double-slash." });
         try expectNextTokenEqualDeep(&it, .{ .comment_block = "/*\n  Block comments start with slash-asterisk\n  and end with asterisk-slash.\n*/" });
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .{ .comment_line = "// Statements don't have to be terminated by ; ..." });
         try expectNextTokenEqualDeep(&it, .lparen);
         try expectNextTokenEqualDeep(&it, .{ .number = "1" });
@@ -595,6 +623,7 @@ test "read token" {
         try expectNextTokenEqualDeep(&it, .rparen);
         try expectNextTokenEqualDeep(&it, .asterisk);
         try expectNextTokenEqualDeep(&it, .{ .number = "2" });
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .{ .comment_line = "// ... but can be." });
         try expectNextTokenEqualDeep(&it, .lparen);
         try expectNextTokenEqualDeep(&it, .{ .number = "1" });
@@ -603,8 +632,11 @@ test "read token" {
         try expectNextTokenEqualDeep(&it, .rparen);
         try expectNextTokenEqualDeep(&it, .asterisk);
         try expectNextTokenEqualDeep(&it, .{ .number = "2" });
+        try expectNextTokenEqualDeep(&it, .semi);
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .{ .comment_line = "/////////////////////////////////////////////" });
         try expectNextTokenEqualDeep(&it, .{ .comment_line = "// Numbers, Strings, and Operators" });
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .{ .comment_line = "// FQL has integer, decimal, and exponential values stored as" });
         try expectNextTokenEqualDeep(&it, .{ .comment_line = "// Int, Long, or Double types, which are all Number types." });
         try expectNextTokenEqualDeep(&it, .{ .comment_line = "// An Int is a signed 32-bit integer type." });
@@ -643,6 +675,7 @@ test "read token" {
         try expectNextTokenEqualDeep(&it, .lparen);
         try expectNextTokenEqualDeep(&it, .{ .word = "server" });
         try expectNextTokenEqualDeep(&it, .rparen);
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .{ .word = "function" });
         try expectNextTokenEqualDeep(&it, .{ .word = "submitOrder" });
         try expectNextTokenEqualDeep(&it, .lparen);
@@ -651,6 +684,7 @@ test "read token" {
         try expectNextTokenEqualDeep(&it, .{ .word = "productsRequested" });
         try expectNextTokenEqualDeep(&it, .rparen);
         try expectNextTokenEqualDeep(&it, .lbrace);
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .{ .word = "if" });
         try expectNextTokenEqualDeep(&it, .lparen);
         try expectNextTokenEqualDeep(&it, .{ .word = "productsRequested" });
@@ -660,28 +694,35 @@ test "read token" {
         try expectNextTokenEqualDeep(&it, .{ .number = "0" });
         try expectNextTokenEqualDeep(&it, .rparen);
         try expectNextTokenEqualDeep(&it, .lbrace);
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .{ .word = "abort" });
         try expectNextTokenEqualDeep(&it, .lparen);
         try expectNextTokenEqualDeep(&it, .{ .string = "\"Cart can't be empty\"" });
         try expectNextTokenEqualDeep(&it, .rparen);
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .rbrace);
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .{ .word = "Order" });
         try expectNextTokenEqualDeep(&it, .dot);
         try expectNextTokenEqualDeep(&it, .{ .word = "create" });
         try expectNextTokenEqualDeep(&it, .lparen);
         try expectNextTokenEqualDeep(&it, .lbrace);
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .{ .word = "customer" });
         try expectNextTokenEqualDeep(&it, .colon);
         try expectNextTokenEqualDeep(&it, .{ .word = "customer" });
         try expectNextTokenEqualDeep(&it, .comma);
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .{ .word = "cart" });
         try expectNextTokenEqualDeep(&it, .colon);
         try expectNextTokenEqualDeep(&it, .{ .word = "shoppingCart" });
         try expectNextTokenEqualDeep(&it, .comma);
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .{ .word = "status" });
         try expectNextTokenEqualDeep(&it, .colon);
         try expectNextTokenEqualDeep(&it, .{ .string = "\"processing\"" });
         try expectNextTokenEqualDeep(&it, .comma);
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .{ .word = "creationDate" });
         try expectNextTokenEqualDeep(&it, .colon);
         try expectNextTokenEqualDeep(&it, .{ .word = "Time" });
@@ -690,23 +731,28 @@ test "read token" {
         try expectNextTokenEqualDeep(&it, .lparen);
         try expectNextTokenEqualDeep(&it, .rparen);
         try expectNextTokenEqualDeep(&it, .comma);
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .{ .word = "shipDate" });
         try expectNextTokenEqualDeep(&it, .colon);
         try expectNextTokenEqualDeep(&it, .{ .word = "null" });
         try expectNextTokenEqualDeep(&it, .comma);
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .{ .word = "deliveryAddress" });
         try expectNextTokenEqualDeep(&it, .colon);
         try expectNextTokenEqualDeep(&it, .{ .word = "customer" });
         try expectNextTokenEqualDeep(&it, .dot);
         try expectNextTokenEqualDeep(&it, .{ .word = "address" });
         try expectNextTokenEqualDeep(&it, .comma);
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .{ .word = "creditCard" });
         try expectNextTokenEqualDeep(&it, .colon);
         try expectNextTokenEqualDeep(&it, .{ .word = "customer" });
         try expectNextTokenEqualDeep(&it, .dot);
         try expectNextTokenEqualDeep(&it, .{ .word = "creditCard" });
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .rbrace);
         try expectNextTokenEqualDeep(&it, .rparen);
+        try expectNextTokenEqualDeep(&it, .eol);
         try expectNextTokenEqualDeep(&it, .rbrace);
         try expectNextTokenEqualDeep(&it, null);
     }

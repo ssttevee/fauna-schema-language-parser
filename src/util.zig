@@ -49,16 +49,24 @@ pub const slice = struct {
         return null;
     }
 
-    pub fn indexOfFn(elements: anytype, predicate: anytype) ?usize {
+    pub inline fn indexOfNonePosFn(elements: anytype, pos: usize, predicate: anytype) ?usize {
+        return indexOfPosFn(elements, pos, predicateNegation(predicate));
+    }
+
+    pub inline fn indexOfFn(elements: anytype, predicate: anytype) ?usize {
         return indexOfPosFn(elements, 0, predicate);
     }
 
-    pub fn some(elements: anytype, predicate: anytype) bool {
+    pub inline fn indexOfNoneFn(elements: anytype, predicate: anytype) ?usize {
+        return indexOfNonePosFn(elements, 0, predicate);
+    }
+
+    pub inline fn some(elements: anytype, predicate: anytype) bool {
         return indexOfFn(elements, predicate) != null;
     }
 
-    pub fn every(elements: anytype, predicate: anytype) bool {
-        return indexOfFn(elements, predicateNegation(predicate)) == null;
+    pub inline fn every(elements: anytype, predicate: anytype) bool {
+        return indexOfNoneFn(elements, predicate) == null;
     }
 };
 
