@@ -830,8 +830,7 @@ pub const FQLExpression = union(enum) {
                         expr.deinit(allocator);
                     }
 
-                    var elements_mutable_copy = self.elements;
-                    elements_mutable_copy.deinit(allocator);
+                    @constCast(&self.elements).deinit(allocator);
                 }
             };
 
@@ -848,8 +847,7 @@ pub const FQLExpression = union(enum) {
                         item.deinit(allocator);
                     }
 
-                    var fields_mutable_copy = self.fields;
-                    fields_mutable_copy.deinit(allocator);
+                    @constCast(&self.fields).deinit(allocator);
                     switch (self.state) {
                         .after_key => |key| key.deinit(allocator),
                         else => {},
@@ -875,8 +873,7 @@ pub const FQLExpression = union(enum) {
                         expr.deinit(allocator);
                     }
 
-                    var arguments_mutable_copy = self.arguments;
-                    arguments_mutable_copy.deinit(allocator);
+                    @constCast(&self.arguments).deinit(allocator);
                     self.function.deinit(allocator);
                 }
             };
@@ -899,8 +896,7 @@ pub const FQLExpression = union(enum) {
                         field.deinit(allocator);
                     }
 
-                    var fields_mutable_copy = self.fields;
-                    fields_mutable_copy.deinit(allocator);
+                    @constCast(&self.fields).deinit(allocator);
                     self.expression.deinit(allocator);
                 }
             };
@@ -965,8 +961,7 @@ pub const FQLExpression = union(enum) {
                             expr.deinit(allocator);
                         }
 
-                        var exprs_mutable_copy = exprs;
-                        exprs_mutable_copy.deinit(allocator);
+                        @constCast(&exprs).deinit(allocator);
                     },
                     inline .after_lbrace, .anonymous_field_access => |key| if (key) |k| k.deinit(allocator),
                     inline .after_identifier, .short_function => |str| allocator.free(str),
@@ -1441,12 +1436,9 @@ pub const FQLExpression = union(enum) {
                     .end => switch (token) {
                         .comma => object_literal.state = .start,
                         .rbrace => {
-                            var fields_mutable_copy = object_literal.fields;
-                            defer fields_mutable_copy.deinit(allocator);
-
                             self.finalizeExpr(.{
                                 .object_literal = .{
-                                    .fields = try fields_mutable_copy.toOwnedSlice(allocator),
+                                    .fields = try object_literal.fields.toOwnedSlice(allocator),
                                 },
                             });
                         },

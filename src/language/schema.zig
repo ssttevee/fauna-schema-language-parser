@@ -502,8 +502,7 @@ pub const SchemaDefinition = union(enum) {
                             else => {},
                         }
 
-                        var members_mutable_copy = self.members;
-                        members_mutable_copy.deinit(allocator);
+                        @constCast(&self.members).deinit(allocator);
                         allocator.free(self.name);
                     }
                 },
@@ -591,8 +590,7 @@ pub const SchemaDefinition = union(enum) {
                                             expr.deinit(allocator);
                                         }
 
-                                        var after_mutable_copy = split.after;
-                                        after_mutable_copy.deinit(allocator);
+                                        @constCast(&split.after).deinit(allocator);
                                         split.first_expr.deinit(allocator);
                                     },
                                 }
@@ -604,8 +602,7 @@ pub const SchemaDefinition = union(enum) {
                                 statement.deinit(allocator);
                             }
 
-                            var statements_mutable_copy = self.statements;
-                            statements_mutable_copy.deinit(allocator);
+                            @constCast(&self.statements).deinit(allocator);
                             self.state.deinit(allocator);
                         }
                     },
@@ -638,8 +635,7 @@ pub const SchemaDefinition = union(enum) {
                                         expr.deinit(allocator);
                                     }
 
-                                    var fields_mutable_copy = self.fields;
-                                    fields_mutable_copy.deinit(allocator);
+                                    @constCast(&self.fields).deinit(allocator);
                                 }
                             },
 
@@ -660,8 +656,7 @@ pub const SchemaDefinition = union(enum) {
                                 member.deinit(allocator);
                             }
 
-                            var members_mutable_copy = self.members;
-                            members_mutable_copy.deinit(allocator);
+                            @constCast(&self.members).deinit(allocator);
                             self.state.deinit(allocator);
                         }
                     },
@@ -684,8 +679,7 @@ pub const SchemaDefinition = union(enum) {
                                 expr.deinit(allocator);
                             }
 
-                            var terms_mutable_copy = self.terms;
-                            terms_mutable_copy.deinit(allocator);
+                            @constCast(&self.terms).deinit(allocator);
                         }
                     },
                     check: struct {
@@ -750,8 +744,7 @@ pub const SchemaDefinition = union(enum) {
                         member.deinit(allocator);
                     }
 
-                    var members_mutable_copy = self.members;
-                    members_mutable_copy.deinit(allocator);
+                    @constCast(&self.members).deinit(allocator);
                 }
             };
 
@@ -808,8 +801,7 @@ pub const SchemaDefinition = union(enum) {
                                 action.deinit(allocator);
                             }
 
-                            var actions_mutable_copy = self.actions;
-                            actions_mutable_copy.deinit(allocator);
+                            @constCast(&self.actions).deinit(allocator);
                             self.state.deinit(allocator);
                             allocator.free(self.resource);
                         }
@@ -837,8 +829,7 @@ pub const SchemaDefinition = union(enum) {
                         member.deinit(allocator);
                     }
 
-                    var members_mutable_copy = self.members;
-                    members_mutable_copy.deinit(allocator);
+                    @constCast(&self.members).deinit(allocator);
                 }
             };
 
@@ -869,8 +860,7 @@ pub const SchemaDefinition = union(enum) {
                             param.deinit(allocator);
                         }
 
-                        var params_mutable_copy = self.params;
-                        params_mutable_copy.deinit(allocator);
+                        @constCast(&self.params).deinit(allocator);
                         allocator.free(self.name);
                     }
                 },
@@ -927,8 +917,7 @@ pub const SchemaDefinition = union(enum) {
                             expr.deinit(allocator);
                         }
 
-                        var exprs_mutable_copy = self.exprs;
-                        exprs_mutable_copy.deinit(allocator);
+                        @constCast(&self.exprs).deinit(allocator);
                         self.expr_parser.deinit(allocator);
                         allocator.free(self.name);
                         allocator.free(self.params);
@@ -962,8 +951,7 @@ pub const SchemaDefinition = union(enum) {
                 allocator.free(annotation.name);
             }
 
-            var annotations_mutable_copy = self.annotations;
-            annotations_mutable_copy.deinit(allocator);
+            @constCast(&self.annotations).deinit(allocator);
 
             switch (self.state) {
                 .empty => {},

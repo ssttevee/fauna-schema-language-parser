@@ -282,8 +282,7 @@ pub const FQLType = union(enum) {
                         fql_type.deinit(allocator);
                     }
 
-                    var types_mutable_copy = self.types;
-                    types_mutable_copy.deinit(allocator);
+                    @constCast(&self.types).deinit(allocator);
                 }
             };
 
@@ -307,8 +306,7 @@ pub const FQLType = union(enum) {
                         field.deinit(allocator);
                     }
 
-                    var fields_mutable_copy = self.fields;
-                    fields_mutable_copy.deinit(allocator);
+                    @constCast(&self.fields).deinit(allocator);
                     self.state.deinit(allocator);
                 }
             };
@@ -322,8 +320,7 @@ pub const FQLType = union(enum) {
                         parameter.deinit(allocator);
                     }
 
-                    var parameters_mutable_copy = self.parameters;
-                    parameters_mutable_copy.deinit(allocator);
+                    @constCast(&self.parameters).deinit(allocator);
                     allocator.free(self.name);
                 }
             };
