@@ -3,6 +3,7 @@ const testing = std.testing;
 
 const Tokenizer = @import("../Tokenizer.zig");
 const util = @import("../util.zig");
+const parsing = @import("../parsing.zig");
 
 const FQLType = @import("type.zig").FQLType;
 const FQLExpression = @import("expression.zig").FQLExpression;
@@ -434,936 +435,1134 @@ pub const SchemaDefinition = union(enum) {
         };
     }
 
-    pub const Parser = struct {
-        pub const Unmanaged = struct {
-            const State = union(enum) {
-                const Annotation = struct {
+    pub const Parser = parsing.ManagedParser(struct {
+        const State = union(enum) {
+            const Annotation = struct {
+                name: []const u8,
+                expr_state: union(enum) {
+                    start,
+                    parsing: FQLExpression.Parser.Unmanaged,
+                    end: FQLExpression,
+                } = .start,
+
+                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                    switch (self.expr_state) {
+                        .start => {},
+                        inline else => |v| v.deinit(allocator),
+                    }
+
+                    allocator.free(self.name);
+                }
+            };
+
+            const AccessProvider = union(enum) {
+                start,
+                before_name,
+                after_name: []const u8,
+                body: struct {
                     name: []const u8,
-                    expr_state: union(enum) {
-                        start,
-                        parsing: FQLExpression.Parser.Unmanaged,
-                        end: FQLExpression,
-                    } = .start,
+                    members: std.ArrayListUnmanaged(SchemaDefinition.AccessProvider.Member) = .{},
+                    state: union(enum) {
+                        empty,
+                        issuer,
+                        jwks_uri,
+                        ttl,
+                        role: union(enum) {
+                            start,
+                            name: []const u8,
+                            block: []const u8,
+                            predicate: struct {
+                                name: []const u8,
+                                expr: FQLExpression.Parser.Unmanaged = .{},
+                            },
+                            end: struct {
+                                name: []const u8,
+                                expr: FQLExpression,
+                            },
+                        },
+                        end,
+                    } = .empty,
 
                     fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                        switch (self.expr_state) {
-                            .start => {},
-                            inline else => |v| v.deinit(allocator),
+                        for (self.members.items) |member| {
+                            member.deinit(allocator);
                         }
 
+                        switch (self.state) {
+                            .role => |role| {
+                                switch (role) {
+                                    .start => {},
+                                    inline .name, .block => |s| allocator.free(s),
+                                    inline .predicate, .end => |v| {
+                                        allocator.free(v.name);
+                                        v.expr.deinit(allocator);
+                                    },
+                                }
+                            },
+                            else => {},
+                        }
+
+                        var members_mutable_copy = self.members;
+                        members_mutable_copy.deinit(allocator);
                         allocator.free(self.name);
                     }
-                };
+                },
 
-                const AccessProvider = union(enum) {
-                    start,
-                    before_name,
-                    after_name: []const u8,
-                    body: struct {
+                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                    switch (self) {
+                        .before_name, .start => {},
+                        .after_name => |name| allocator.free(name),
+                        inline else => |v| v.deinit(allocator),
+                    }
+                }
+            };
+
+            const Collection = struct {
+                const Member = union(enum) {
+                    empty,
+                    field: struct {
                         name: []const u8,
-                        members: std.ArrayListUnmanaged(SchemaDefinition.AccessProvider.Member) = .{},
+                        type: ?FQLType = null,
+                        parser: ?union(enum) {
+                            type: FQLType.Parser.Unmanaged,
+                            expr: FQLExpression.Parser.Unmanaged,
+                        } = null,
+                        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                            if (self.type) |fql_type| {
+                                fql_type.deinit(allocator);
+                            }
+
+                            if (self.parser) |parser| {
+                                switch (parser) {
+                                    inline else => |p| p.deinit(allocator),
+                                }
+                            }
+
+                            allocator.free(self.name);
+                        }
+                    },
+                    migrations: struct {
+                        statements: std.ArrayListUnmanaged(SchemaDefinition.Collection.Member.Migration) = .{},
                         state: union(enum) {
-                            empty,
-                            issuer,
-                            jwks_uri,
-                            ttl,
-                            role: union(enum) {
-                                start,
-                                name: []const u8,
-                                block: []const u8,
-                                predicate: struct {
-                                    name: []const u8,
-                                    expr: FQLExpression.Parser.Unmanaged = .{},
-                                },
-                                end: struct {
-                                    name: []const u8,
-                                    expr: FQLExpression,
-                                },
+                            before_lbrace,
+                            start,
+
+                            first_expr: struct {
+                                tag: std.meta.Tag(SchemaDefinition.Collection.Member.Migration),
+                                parser: FQLExpression.Parser.Unmanaged = .{},
                             },
-                            end,
-                        } = .empty,
+
+                            before_arrow: struct {
+                                tag: enum { move, backfill, split },
+                                first_expr: FQLExpression,
+                            },
+
+                            move: struct {
+                                first_expr: FQLExpression,
+                                parser: FQLExpression.Parser.Unmanaged = .{},
+                            },
+
+                            backfill: struct {
+                                first_expr: FQLExpression,
+                                parser: FQLExpression.Parser.Unmanaged = .{},
+                            },
+
+                            split: struct {
+                                first_expr: FQLExpression,
+                                after: std.ArrayListUnmanaged(FQLExpression) = .{},
+                                parser: ?FQLExpression.Parser.Unmanaged = .{},
+                            },
+
+                            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                                switch (self) {
+                                    .before_lbrace, .start => {},
+                                    .first_expr => |first_expr| first_expr.parser.deinit(allocator),
+                                    .before_arrow => |before_arrow| before_arrow.first_expr.deinit(allocator),
+                                    inline .move, .backfill => |state| {
+                                        state.first_expr.deinit(allocator);
+                                        state.parser.deinit(allocator);
+                                    },
+                                    .split => |split| {
+                                        if (split.parser) |parser| {
+                                            parser.deinit(allocator);
+                                        }
+
+                                        for (split.after.items) |expr| {
+                                            expr.deinit(allocator);
+                                        }
+
+                                        var after_mutable_copy = split.after;
+                                        after_mutable_copy.deinit(allocator);
+                                        split.first_expr.deinit(allocator);
+                                    },
+                                }
+                            }
+                        } = .before_lbrace,
 
                         fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                            switch (self.state) {
-                                .role => |role| {
-                                    switch (role) {
-                                        .start => {},
-                                        inline .name, .block => |s| allocator.free(s),
-                                        inline .predicate, .end => |v| {
-                                            allocator.free(v.name);
-                                            v.expr.deinit(allocator);
-                                        },
+                            for (self.statements.items) |statement| {
+                                statement.deinit(allocator);
+                            }
+
+                            var statements_mutable_copy = self.statements;
+                            statements_mutable_copy.deinit(allocator);
+                            self.state.deinit(allocator);
+                        }
+                    },
+                    history_days,
+                    document_ttls,
+                    ttl_days,
+                    index: struct {
+                        name: ?[]const u8 = null,
+                        members: std.ArrayListUnmanaged(SchemaDefinition.Collection.Member.Index.Member) = .{},
+                        state: union(enum) {
+                            before_lbrace,
+                            start,
+                            property: struct {
+                                type: enum { terms, values },
+                                fields: std.ArrayListUnmanaged(FQLExpression) = .{},
+                                state: union(enum) {
+                                    before_lbracket,
+                                    start,
+                                    parsing: FQLExpression.Parser.Unmanaged,
+                                    end,
+                                } = .before_lbracket,
+
+                                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                                    switch (self.state) {
+                                        .parsing => |parser| parser.deinit(allocator),
+                                        else => {},
                                     }
-                                },
-                                else => {},
+
+                                    for (self.fields.items) |expr| {
+                                        expr.deinit(allocator);
+                                    }
+
+                                    var fields_mutable_copy = self.fields;
+                                    fields_mutable_copy.deinit(allocator);
+                                }
+                            },
+
+                            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                                switch (self) {
+                                    .property => |property| property.deinit(allocator),
+                                    else => {},
+                                }
+                            }
+                        } = .before_lbrace,
+
+                        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                            if (self.name) |name| {
+                                allocator.free(name);
+                            }
+
+                            for (self.members.items) |member| {
+                                member.deinit(allocator);
                             }
 
                             var members_mutable_copy = self.members;
                             members_mutable_copy.deinit(allocator);
-                            allocator.free(self.name);
+                            self.state.deinit(allocator);
                         }
                     },
-
-                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                        switch (self) {
-                            .before_name, .start => {},
-                            .after_name => |name| allocator.free(name),
-                            inline else => |v| v.deinit(allocator),
-                        }
-                    }
-                };
-
-                const Collection = struct {
-                    const Member = union(enum) {
-                        empty,
-                        field: struct {
-                            name: []const u8,
-                            type: ?FQLType = null,
-                            parser: ?union(enum) {
-                                type: FQLType.Parser.Unmanaged,
-                                expr: FQLExpression.Parser.Unmanaged,
-                            } = null,
-                            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                                if (self.type) |fql_type| {
-                                    fql_type.deinit(allocator);
-                                }
-
-                                if (self.parser) |parser| {
-                                    switch (parser) {
-                                        inline else => |p| p.deinit(allocator),
-                                    }
-                                }
-
-                                allocator.free(self.name);
-                            }
-                        },
-                        migrations: struct {
-                            statements: std.ArrayListUnmanaged(SchemaDefinition.Collection.Member.Migration) = .{},
-                            state: union(enum) {
-                                before_lbrace,
-                                start,
-
-                                first_expr: struct {
-                                    tag: std.meta.Tag(SchemaDefinition.Collection.Member.Migration),
-                                    parser: FQLExpression.Parser.Unmanaged = .{},
-                                },
-
-                                before_arrow: struct {
-                                    tag: enum { move, backfill, split },
-                                    first_expr: FQLExpression,
-                                },
-
-                                move: struct {
-                                    first_expr: FQLExpression,
-                                    parser: FQLExpression.Parser.Unmanaged = .{},
-                                },
-
-                                backfill: struct {
-                                    first_expr: FQLExpression,
-                                    parser: FQLExpression.Parser.Unmanaged = .{},
-                                },
-
-                                split: struct {
-                                    first_expr: FQLExpression,
-                                    after: std.ArrayListUnmanaged(FQLExpression) = .{},
-                                    parser: ?FQLExpression.Parser.Unmanaged = .{},
-                                },
-
-                                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                                    switch (self) {
-                                        .before_lbrace, .start => {},
-                                        .first_expr => |first_expr| first_expr.parser.deinit(allocator),
-                                        .before_arrow => |before_arrow| before_arrow.first_expr.deinit(allocator),
-                                        inline .move, .backfill => |state| {
-                                            state.first_expr.deinit(allocator);
-                                            state.parser.deinit(allocator);
-                                        },
-                                        .split => |split| {
-                                            if (split.parser) |parser| {
-                                                parser.deinit(allocator);
-                                            }
-
-                                            for (split.after.items) |expr| {
-                                                expr.deinit(allocator);
-                                            }
-
-                                            var after_mutable_copy = split.after;
-                                            after_mutable_copy.deinit(allocator);
-                                            split.first_expr.deinit(allocator);
-                                        },
-                                    }
-                                }
-                            } = .before_lbrace,
-
-                            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                                for (self.statements.items) |statement| {
-                                    statement.deinit(allocator);
-                                }
-
-                                var statements_mutable_copy = self.statements;
-                                statements_mutable_copy.deinit(allocator);
-                                self.state.deinit(allocator);
-                            }
-                        },
-                        history_days,
-                        document_ttls,
-                        ttl_days,
-                        index: struct {
-                            name: ?[]const u8 = null,
-                            members: std.ArrayListUnmanaged(SchemaDefinition.Collection.Member.Index.Member) = .{},
-                            state: union(enum) {
-                                before_lbrace,
-                                start,
-                                property: struct {
-                                    type: enum { terms, values },
-                                    fields: std.ArrayListUnmanaged(FQLExpression) = .{},
-                                    state: union(enum) {
-                                        before_lbracket,
-                                        start,
-                                        parsing: FQLExpression.Parser.Unmanaged,
-                                        end,
-                                    } = .before_lbracket,
-
-                                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                                        switch (self.state) {
-                                            .parsing => |parser| parser.deinit(allocator),
-                                            else => {},
-                                        }
-
-                                        for (self.fields.items) |expr| {
-                                            expr.deinit(allocator);
-                                        }
-
-                                        var fields_mutable_copy = self.fields;
-                                        fields_mutable_copy.deinit(allocator);
-                                    }
-                                },
-
-                                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                                    switch (self) {
-                                        .property => |property| property.deinit(allocator),
-                                        else => {},
-                                    }
-                                }
-                            } = .before_lbrace,
-
-                            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                                if (self.name) |name| {
-                                    allocator.free(name);
-                                }
-
-                                for (self.members.items) |member| {
-                                    member.deinit(allocator);
-                                }
-
-                                var members_mutable_copy = self.members;
-                                members_mutable_copy.deinit(allocator);
-                                self.state.deinit(allocator);
-                            }
-                        },
-                        unique: struct {
-                            terms: std.ArrayListUnmanaged(FQLExpression) = .{},
-                            state: union(enum) {
-                                before_lbracket,
-                                start,
-                                parsing: FQLExpression.Parser.Unmanaged,
-                                end,
-                            } = .before_lbracket,
-
-                            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                                switch (self.state) {
-                                    .parsing => |parser| parser.deinit(allocator),
-                                    else => {},
-                                }
-
-                                for (self.terms.items) |expr| {
-                                    expr.deinit(allocator);
-                                }
-
-                                var terms_mutable_copy = self.terms;
-                                terms_mutable_copy.deinit(allocator);
-                            }
-                        },
-                        check: struct {
-                            name: ?[]const u8 = null,
-                            parser: FQLExpression.Parser.Unmanaged = .{},
-
-                            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                                if (self.name) |name| {
-                                    allocator.free(name);
-                                }
-
-                                self.parser.deinit(allocator);
-                            }
-                        },
-                        compute: struct {
-                            name: ?[]const u8 = null,
-                            type: ?FQLType = null,
-                            parser: ?union(enum) {
-                                type: FQLType.Parser.Unmanaged,
-                                expr: FQLExpression.Parser.Unmanaged,
-                            } = null,
-
-                            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                                if (self.name) |name| {
-                                    allocator.free(name);
-                                }
-
-                                if (self.type) |fql_type| {
-                                    fql_type.deinit(allocator);
-                                }
-
-                                if (self.parser) |parser| {
-                                    switch (parser) {
-                                        inline else => |p| p.deinit(allocator),
-                                    }
-                                }
-                            }
-                        },
-
-                        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                            switch (self) {
-                                .empty, .history_days, .document_ttls, .ttl_days => {},
-                                inline else => |state| state.deinit(allocator),
-                            }
-                        }
-                    };
-
-                    name: ?[]const u8 = null,
-                    members: std.ArrayListUnmanaged(SchemaDefinition.Collection.Member) = .{},
-                    member_state: ?Member = null,
-
-                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                        if (self.name) |name| {
-                            allocator.free(name);
-                        }
-
-                        if (self.member_state) |state| {
-                            state.deinit(allocator);
-                        }
-
-                        for (self.members.items) |member| {
-                            member.deinit(allocator);
-                        }
-
-                        var members_mutable_copy = self.members;
-                        members_mutable_copy.deinit(allocator);
-                    }
-                };
-
-                const Role = struct {
-                    name: ?[]const u8 = null,
-                    members: std.ArrayListUnmanaged(SchemaDefinition.Role.Member) = .{},
-                    member_state: ?union(enum) {
-                        empty,
-                        membership,
-                        membership_collection: []const u8,
-                        membership_block: struct {
-                            collection: []const u8,
-                            state: union(enum) {
-                                start,
-                                predicate: FQLExpression.Parser.Unmanaged,
-                                end: FQLExpression,
-                            } = .start,
-
-                            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                                switch (self.state) {
-                                    .start => {},
-                                    inline .predicate, .end => |s| s.deinit(allocator),
-                                }
-
-                                allocator.free(self.collection);
-                            }
-                        },
-                        privileges,
-                        privileges_resource: []const u8,
-                        privileges_block: struct {
-                            resource: []const u8,
-                            actions: std.ArrayListUnmanaged(SchemaDefinition.Role.Member.Privileges.Action) = .{},
-                            state: union(enum) {
-                                start,
-                                action: SchemaDefinition.Role.Member.Privileges.Action.Action,
-                                action_block: SchemaDefinition.Role.Member.Privileges.Action.Action,
-                                action_predicate: struct {
-                                    action: SchemaDefinition.Role.Member.Privileges.Action.Action,
-                                    expr_parser: FQLExpression.Parser.Unmanaged = .{},
-                                },
-                                action_end: SchemaDefinition.Role.Member.Privileges.Action,
-
-                                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                                    switch (self) {
-                                        .start, .action, .action_block => {},
-                                        .action_predicate => |action_predicate| action_predicate.expr_parser.deinit(allocator),
-                                        .action_end => |action| action.deinit(allocator),
-                                    }
-                                }
-                            } = .start,
-
-                            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                                for (self.actions.items) |action| {
-                                    action.deinit(allocator);
-                                }
-
-                                var actions_mutable_copy = self.actions;
-                                actions_mutable_copy.deinit(allocator);
-                                self.state.deinit(allocator);
-                                allocator.free(self.resource);
-                            }
-                        },
-
-                        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                            switch (self) {
-                                .empty, .membership, .privileges => {},
-                                inline .membership_collection, .privileges_resource => |s| allocator.free(s),
-                                inline .membership_block, .privileges_block => |s| s.deinit(allocator),
-                            }
-                        }
-                    } = null,
-
-                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                        if (self.name) |name| {
-                            allocator.free(name);
-                        }
-
-                        if (self.member_state) |state| {
-                            state.deinit(allocator);
-                        }
-
-                        for (self.members.items) |member| {
-                            member.deinit(allocator);
-                        }
-
-                        var members_mutable_copy = self.members;
-                        members_mutable_copy.deinit(allocator);
-                    }
-                };
-
-                const Function = union(enum) {
-                    start,
-                    after_name: []const u8,
-                    params: struct {
-                        name: []const u8,
-                        params: std.ArrayListUnmanaged(SchemaDefinition.Function.Parameter) = .{},
-                        param_state: union(enum) {
+                    unique: struct {
+                        terms: std.ArrayListUnmanaged(FQLExpression) = .{},
+                        state: union(enum) {
+                            before_lbracket,
                             start,
-                            after_name: []const u8,
-                            before_type: struct { name: []const u8, type_parser: FQLType.Parser.Unmanaged = .{} },
+                            parsing: FQLExpression.Parser.Unmanaged,
                             end,
-                        } = .start,
+                        } = .before_lbracket,
 
                         fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                            switch (self.param_state) {
-                                .start, .end => {},
-                                .after_name => |name| allocator.free(name),
-                                .before_type => |before_type| {
-                                    allocator.free(before_type.name);
-                                    before_type.type_parser.deinit(allocator);
-                                },
+                            switch (self.state) {
+                                .parsing => |parser| parser.deinit(allocator),
+                                else => {},
                             }
 
-                            for (self.params.items) |param| {
-                                param.deinit(allocator);
-                            }
-
-                            var params_mutable_copy = self.params;
-                            params_mutable_copy.deinit(allocator);
-                            allocator.free(self.name);
-                        }
-                    },
-                    return_type: struct {
-                        name: []const u8,
-                        params: []const SchemaDefinition.Function.Parameter,
-                        type_parser: FQLType.Parser.Unmanaged = .{},
-
-                        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                            for (self.params) |param| {
-                                param.deinit(allocator);
-                            }
-
-                            allocator.free(self.name);
-                            allocator.free(self.params);
-                            self.type_parser.deinit(allocator);
-                        }
-                    },
-                    before_body: struct {
-                        name: []const u8,
-                        params: []const SchemaDefinition.Function.Parameter,
-                        return_type: ?FQLType = null,
-
-                        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                            if (self.return_type) |return_type| {
-                                return_type.deinit(allocator);
-                            }
-
-                            for (self.params) |param| {
-                                param.deinit(allocator);
-                            }
-
-                            allocator.free(self.name);
-                            allocator.free(self.params);
-                        }
-                    },
-                    body: struct {
-                        name: []const u8,
-                        params: []const SchemaDefinition.Function.Parameter,
-                        return_type: ?FQLType,
-                        exprs: std.ArrayListUnmanaged(FQLExpression) = .{},
-                        expr_parser: FQLExpression.Parser.Unmanaged = .{},
-
-                        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                            if (self.return_type) |return_type| {
-                                return_type.deinit(allocator);
-                            }
-
-                            for (self.params) |param| {
-                                param.deinit(allocator);
-                            }
-
-                            for (self.exprs.items) |expr| {
+                            for (self.terms.items) |expr| {
                                 expr.deinit(allocator);
                             }
 
-                            var exprs_mutable_copy = self.exprs;
-                            exprs_mutable_copy.deinit(allocator);
-                            self.expr_parser.deinit(allocator);
-                            allocator.free(self.name);
-                            allocator.free(self.params);
+                            var terms_mutable_copy = self.terms;
+                            terms_mutable_copy.deinit(allocator);
+                        }
+                    },
+                    check: struct {
+                        name: ?[]const u8 = null,
+                        parser: FQLExpression.Parser.Unmanaged = .{},
+
+                        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                            if (self.name) |name| {
+                                allocator.free(name);
+                            }
+
+                            self.parser.deinit(allocator);
+                        }
+                    },
+                    compute: struct {
+                        name: ?[]const u8 = null,
+                        type: ?FQLType = null,
+                        parser: ?union(enum) {
+                            type: FQLType.Parser.Unmanaged,
+                            expr: FQLExpression.Parser.Unmanaged,
+                        } = null,
+
+                        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                            if (self.name) |name| {
+                                allocator.free(name);
+                            }
+
+                            if (self.type) |fql_type| {
+                                fql_type.deinit(allocator);
+                            }
+
+                            if (self.parser) |parser| {
+                                switch (parser) {
+                                    inline else => |p| p.deinit(allocator),
+                                }
+                            }
                         }
                     },
 
                     fn deinit(self: @This(), allocator: std.mem.Allocator) void {
                         switch (self) {
-                            .start => {},
-                            .after_name => |name| allocator.free(name),
+                            .empty, .history_days, .document_ttls, .ttl_days => {},
                             inline else => |state| state.deinit(allocator),
                         }
                     }
                 };
 
-                empty,
-                annotation: State.Annotation,
-                access_provider: State.AccessProvider,
-                collection: State.Collection,
-                role: State.Role,
-                function: State.Function,
-                end: SchemaDefinition,
+                name: ?[]const u8 = null,
+                members: std.ArrayListUnmanaged(SchemaDefinition.Collection.Member) = .{},
+                member_state: ?Member = null,
+
+                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                    if (self.name) |name| {
+                        allocator.free(name);
+                    }
+
+                    if (self.member_state) |state| {
+                        state.deinit(allocator);
+                    }
+
+                    for (self.members.items) |member| {
+                        member.deinit(allocator);
+                    }
+
+                    var members_mutable_copy = self.members;
+                    members_mutable_copy.deinit(allocator);
+                }
             };
 
-            annotations: std.ArrayListUnmanaged(struct { name: []const u8, value: FQLExpression }) = .{},
-            state: State = .empty,
+            const Role = struct {
+                name: ?[]const u8 = null,
+                members: std.ArrayListUnmanaged(SchemaDefinition.Role.Member) = .{},
+                member_state: ?union(enum) {
+                    empty,
+                    membership,
+                    membership_collection: []const u8,
+                    membership_block: struct {
+                        collection: []const u8,
+                        state: union(enum) {
+                            start,
+                            predicate: FQLExpression.Parser.Unmanaged,
+                            end: FQLExpression,
+                        } = .start,
 
-            pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                for (self.annotations.items) |annotation| {
-                    annotation.value.deinit(allocator);
-                    allocator.free(annotation.name);
+                        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                            switch (self.state) {
+                                .start => {},
+                                inline .predicate, .end => |s| s.deinit(allocator),
+                            }
+
+                            allocator.free(self.collection);
+                        }
+                    },
+                    privileges,
+                    privileges_resource: []const u8,
+                    privileges_block: struct {
+                        resource: []const u8,
+                        actions: std.ArrayListUnmanaged(SchemaDefinition.Role.Member.Privileges.Action) = .{},
+                        state: union(enum) {
+                            start,
+                            action: SchemaDefinition.Role.Member.Privileges.Action.Action,
+                            action_block: SchemaDefinition.Role.Member.Privileges.Action.Action,
+                            action_predicate: struct {
+                                action: SchemaDefinition.Role.Member.Privileges.Action.Action,
+                                expr_parser: FQLExpression.Parser.Unmanaged = .{},
+                            },
+                            action_end: SchemaDefinition.Role.Member.Privileges.Action,
+
+                            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                                switch (self) {
+                                    .start, .action, .action_block => {},
+                                    .action_predicate => |action_predicate| action_predicate.expr_parser.deinit(allocator),
+                                    .action_end => |action| action.deinit(allocator),
+                                }
+                            }
+                        } = .start,
+
+                        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                            for (self.actions.items) |action| {
+                                action.deinit(allocator);
+                            }
+
+                            var actions_mutable_copy = self.actions;
+                            actions_mutable_copy.deinit(allocator);
+                            self.state.deinit(allocator);
+                            allocator.free(self.resource);
+                        }
+                    },
+
+                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                        switch (self) {
+                            .empty, .membership, .privileges => {},
+                            inline .membership_collection, .privileges_resource => |s| allocator.free(s),
+                            inline .membership_block, .privileges_block => |s| s.deinit(allocator),
+                        }
+                    }
+                } = null,
+
+                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                    if (self.name) |name| {
+                        allocator.free(name);
+                    }
+
+                    if (self.member_state) |state| {
+                        state.deinit(allocator);
+                    }
+
+                    for (self.members.items) |member| {
+                        member.deinit(allocator);
+                    }
+
+                    var members_mutable_copy = self.members;
+                    members_mutable_copy.deinit(allocator);
                 }
+            };
 
-                var annotations_mutable_copy = self.annotations;
-                annotations_mutable_copy.deinit(allocator);
+            const Function = union(enum) {
+                start,
+                after_name: []const u8,
+                params: struct {
+                    name: []const u8,
+                    params: std.ArrayListUnmanaged(SchemaDefinition.Function.Parameter) = .{},
+                    param_state: union(enum) {
+                        start,
+                        after_name: []const u8,
+                        before_type: struct { name: []const u8, type_parser: FQLType.Parser.Unmanaged = .{} },
+                        end,
+                    } = .start,
 
-                switch (self.state) {
-                    .empty => {},
-                    inline else => |s| s.deinit(allocator),
+                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                        switch (self.param_state) {
+                            .start, .end => {},
+                            .after_name => |name| allocator.free(name),
+                            .before_type => |before_type| {
+                                allocator.free(before_type.name);
+                                before_type.type_parser.deinit(allocator);
+                            },
+                        }
+
+                        for (self.params.items) |param| {
+                            param.deinit(allocator);
+                        }
+
+                        var params_mutable_copy = self.params;
+                        params_mutable_copy.deinit(allocator);
+                        allocator.free(self.name);
+                    }
+                },
+                return_type: struct {
+                    name: []const u8,
+                    params: []const SchemaDefinition.Function.Parameter,
+                    type_parser: FQLType.Parser.Unmanaged = .{},
+
+                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                        for (self.params) |param| {
+                            param.deinit(allocator);
+                        }
+
+                        allocator.free(self.name);
+                        allocator.free(self.params);
+                        self.type_parser.deinit(allocator);
+                    }
+                },
+                before_body: struct {
+                    name: []const u8,
+                    params: []const SchemaDefinition.Function.Parameter,
+                    return_type: ?FQLType = null,
+
+                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                        if (self.return_type) |return_type| {
+                            return_type.deinit(allocator);
+                        }
+
+                        for (self.params) |param| {
+                            param.deinit(allocator);
+                        }
+
+                        allocator.free(self.name);
+                        allocator.free(self.params);
+                    }
+                },
+                body: struct {
+                    name: []const u8,
+                    params: []const SchemaDefinition.Function.Parameter,
+                    return_type: ?FQLType,
+                    exprs: std.ArrayListUnmanaged(FQLExpression) = .{},
+                    expr_parser: FQLExpression.Parser.Unmanaged = .{},
+
+                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                        if (self.return_type) |return_type| {
+                            return_type.deinit(allocator);
+                        }
+
+                        for (self.params) |param| {
+                            param.deinit(allocator);
+                        }
+
+                        for (self.exprs.items) |expr| {
+                            expr.deinit(allocator);
+                        }
+
+                        var exprs_mutable_copy = self.exprs;
+                        exprs_mutable_copy.deinit(allocator);
+                        self.expr_parser.deinit(allocator);
+                        allocator.free(self.name);
+                        allocator.free(self.params);
+                    }
+                },
+
+                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                    switch (self) {
+                        .start => {},
+                        .after_name => |name| allocator.free(name),
+                        inline else => |state| state.deinit(allocator),
+                    }
                 }
+            };
+
+            empty,
+            annotation: State.Annotation,
+            access_provider: State.AccessProvider,
+            collection: State.Collection,
+            role: State.Role,
+            function: State.Function,
+            end: SchemaDefinition,
+        };
+
+        annotations: std.ArrayListUnmanaged(struct { name: []const u8, value: FQLExpression }) = .{},
+        state: State = .empty,
+
+        pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+            for (self.annotations.items) |annotation| {
+                annotation.value.deinit(allocator);
+                allocator.free(annotation.name);
             }
 
-            pub fn pushToken(self: *Unmanaged, allocator: std.mem.Allocator, token: Tokenizer.Token) !PushResult {
-                // std.debug.print("schema parser state: {s}\n", .{@tagName(self.state)});
-                // std.debug.print("got token: {any}\n", .{token});
+            var annotations_mutable_copy = self.annotations;
+            annotations_mutable_copy.deinit(allocator);
 
-                if (token == .comment_line or token == .comment_block) {
-                    return .{};
-                }
+            switch (self.state) {
+                .empty => {},
+                inline else => |s| s.deinit(allocator),
+            }
+        }
 
-                switch (self.state) {
-                    .empty => {
-                        switch (token) {
-                            .eol => {},
-                            .annotation => |annotation| {
-                                self.state = .{ .annotation = .{ .name = try allocator.dupe(u8, annotation) } };
-                            },
-                            .word => |word| {
-                                if (std.meta.stringToEnum(enum { access, collection, role, function }, word)) |keyword| {
-                                    switch (keyword) {
-                                        .access => {
-                                            self.state = .{ .access_provider = .start };
-                                        },
-                                        .collection => {
-                                            self.state = .{ .collection = .{} };
-                                        },
-                                        .role => {
-                                            self.state = .{ .role = .{} };
-                                        },
-                                        .function => {
-                                            self.state = .{ .function = .start };
-                                        },
-                                    }
-                                } else {
-                                    std.log.err("unexpected token: expected word to equal \"access\", \"collection\", \"role\" or \"function\" but got \"{s}\"", .{word});
-                                    return error.UnexpectedToken;
+        pub const PushResult = struct {
+            save: ?Tokenizer.Token = null,
+            definition: ?SchemaDefinition = null,
+        };
+
+        pub fn pushToken(self: *@This(), allocator: std.mem.Allocator, token: Tokenizer.Token) !PushResult {
+            // std.debug.print("schema parser state: {s}\n", .{@tagName(self.state)});
+            // std.debug.print("got token: {any}\n", .{token});
+
+            if (token == .comment_line or token == .comment_block) {
+                return .{};
+            }
+
+            switch (self.state) {
+                .empty => {
+                    switch (token) {
+                        .eol => {},
+                        .annotation => |annotation| {
+                            self.state = .{ .annotation = .{ .name = try allocator.dupe(u8, annotation) } };
+                        },
+                        .word => |word| {
+                            if (std.meta.stringToEnum(enum { access, collection, role, function }, word)) |keyword| {
+                                switch (keyword) {
+                                    .access => {
+                                        self.state = .{ .access_provider = .start };
+                                    },
+                                    .collection => {
+                                        self.state = .{ .collection = .{} };
+                                    },
+                                    .role => {
+                                        self.state = .{ .role = .{} };
+                                    },
+                                    .function => {
+                                        self.state = .{ .function = .start };
+                                    },
                                 }
-                            },
-                            else => {
-                                std.log.err("unexpected token: expected annotation or word but got {s}", .{@tagName(token)});
+                            } else {
+                                std.log.err("unexpected token: expected word to equal \"access\", \"collection\", \"role\" or \"function\" but got \"{s}\"", .{word});
                                 return error.UnexpectedToken;
-                            },
-                        }
-                    },
-                    .annotation => |*annotation| {
-                        switch (annotation.expr_state) {
-                            .start => {
-                                switch (token) {
-                                    .lparen => {
-                                        annotation.expr_state = .{ .parsing = .{} };
-                                    },
-                                    else => {
-                                        std.log.err("unexpected token: expected lparen but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    },
-                                }
-                            },
-                            .parsing => |*parser| {
-                                const res = try parser.pushToken(allocator, token);
-                                if (res.expr) |expr| {
-                                    annotation.expr_state = .{ .end = expr };
-                                }
-
-                                return .{ .save = res.save };
-                            },
-                            .end => |expr| {
-                                switch (token) {
-                                    .rparen => {
-                                        try self.annotations.append(allocator, .{
-                                            .name = annotation.name,
-                                            .value = expr,
-                                        });
-
-                                        self.state = .empty;
-                                    },
-                                    else => {
-                                        std.log.err("unexpected token: expected rparen but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    },
-                                }
-                            },
-                        }
-                    },
-                    .access_provider => |*access_provider| {
-                        switch (access_provider.*) {
-                            .start => {
-                                switch (token) {
-                                    .word => |word| {
-                                        if (!std.mem.eql(u8, word, "provider")) {
-                                            std.log.err("unexpected token: expected word to equal \"provider\" but got \"{s}\"", .{word});
-                                            return error.UnexpectedToken;
-                                        }
-
-                                        access_provider.* = .before_name;
-                                    },
-                                    else => {
-                                        std.log.err("unexpected token: expected word but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    },
-                                }
-                            },
-                            .before_name => {
-                                switch (token) {
-                                    inline .string, .word => |s| {
-                                        access_provider.* = .{ .after_name = try allocator.dupe(u8, s) };
-                                    },
-                                    else => {
-                                        std.log.err("unexpected token: expected string or word but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    },
-                                }
-                            },
-                            .after_name => |name| {
-                                switch (token) {
-                                    .lbrace => {
-                                        access_provider.* = .{ .body = .{ .name = name } };
-                                    },
-                                    else => {
-                                        std.log.err("unexpected token: expected lbrace but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    },
-                                }
-                            },
-                            .body => |*body| {
-                                switch (body.state) {
-                                    .empty => {
-                                        switch (token) {
-                                            .semi, .eol => {},
-                                            .word => |word| {
-                                                if (std.meta.stringToEnum(enum { issuer, jwks_uri, role, ttl }, word)) |keyword| {
-                                                    switch (keyword) {
-                                                        .issuer => {
-                                                            body.state = .issuer;
-                                                        },
-                                                        .jwks_uri => {
-                                                            body.state = .jwks_uri;
-                                                        },
-                                                        .role => {
-                                                            body.state = .{ .role = .start };
-                                                        },
-                                                        .ttl => {
-                                                            body.state = .ttl;
-                                                        },
-                                                    }
-                                                } else {
-                                                    std.log.err("unexpected token: expected word to equal \"issuer\", \"jwks_uri\", \"role\" or \"ttl\" but got \"{s}\"", .{word});
-                                                    return error.UnexpectedToken;
-                                                }
-                                            },
-                                            .rbrace => {
-                                                body.state = .end;
-                                                return .{ .save = token };
-                                            },
-                                            else => {
-                                                std.log.err("unexpected token: expected semi, eol, word or rbrace but got {s}", .{@tagName(token)});
-                                                return error.UnexpectedToken;
-                                            },
-                                        }
-                                    },
-                                    inline .issuer, .jwks_uri, .ttl => |_, tag| {
-                                        switch (token) {
-                                            .string => |str| {
-                                                try body.members.append(
-                                                    allocator,
-                                                    @unionInit(SchemaDefinition.AccessProvider.Member, @tagName(tag), try allocator.dupe(u8, str)),
-                                                );
-
-                                                body.state = .empty;
-                                            },
-                                            else => {
-                                                std.log.err("unexpected token: expected string but got {s}", .{@tagName(token)});
-                                                return error.UnexpectedToken;
-                                            },
-                                        }
-                                    },
-                                    .role => |*role| {
-                                        switch (role.*) {
-                                            .start => {
-                                                switch (token) {
-                                                    inline .word, .string => |s| {
-                                                        role.* = .{ .name = try allocator.dupe(u8, s) };
-                                                    },
-                                                    else => {
-                                                        std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
-                                                        return error.UnexpectedToken;
-                                                    },
-                                                }
-                                            },
-                                            .name => |name| {
-                                                switch (token) {
-                                                    .lbrace => {
-                                                        role.* = .{ .block = name };
-                                                    },
-                                                    .eol, .semi => {
-                                                        try body.members.append(allocator, .{ .role = .{ .name = name } });
-
-                                                        body.state = .empty;
-                                                    },
-                                                    else => {
-                                                        std.log.err("unexpected token: expected lbrace, eol or semi but got {s}", .{@tagName(token)});
-                                                        return error.UnexpectedToken;
-                                                    },
-                                                }
-                                            },
-                                            .block => |name| {
-                                                switch (token) {
-                                                    .eol, .semi => {},
-                                                    .word => |word| {
-                                                        if (!std.mem.eql(u8, word, "predicate")) {
-                                                            std.log.err("unexpected token: expected word to equal \"predicate\" but got \"{s}\"", .{word});
-                                                            return error.UnexpectedToken;
-                                                        }
-
-                                                        role.* = .{ .predicate = .{ .name = name } };
-                                                    },
-                                                    else => {
-                                                        std.log.err("unexpected token: expected eol, semi or word but got {s}", .{@tagName(token)});
-                                                        return error.UnexpectedToken;
-                                                    },
-                                                }
-                                            },
-                                            .predicate => |*predicate| {
-                                                const res = try predicate.expr.pushToken(allocator, token);
-                                                if (res.expr) |expr| {
-                                                    role.* = .{
-                                                        .end = .{
-                                                            .name = predicate.name,
-                                                            .expr = expr,
-                                                        },
-                                                    };
-                                                }
-
-                                                return .{ .save = res.save };
-                                            },
-                                            .end => |end| {
-                                                switch (token) {
-                                                    .eol, .semi => {},
-                                                    .rbrace => {
-                                                        try body.members.append(allocator, .{
-                                                            .role = .{
-                                                                .name = end.name,
-                                                                .predicate = end.expr,
-                                                            },
-                                                        });
-
-                                                        body.state = .end;
-                                                    },
-                                                    else => {
-                                                        std.log.err("unexpected token: expected rbrace but got {s}", .{@tagName(token)});
-                                                        return error.UnexpectedToken;
-                                                    },
-                                                }
-                                            },
-                                        }
-                                    },
-                                    .end => {
-                                        switch (token) {
-                                            .semi, .eol => {
-                                                body.state = .empty;
-                                            },
-                                            .rbrace => {
-                                                self.state = .{
-                                                    .end = .{
-                                                        .access_provider = .{
-                                                            .name = body.name,
-                                                            .members = try body.members.toOwnedSlice(allocator),
-                                                        },
-                                                    },
-                                                };
-                                            },
-                                            else => {
-                                                std.log.err("unexpected token: expected word or rbrace but got {s}", .{@tagName(token)});
-                                                return error.UnexpectedToken;
-                                            },
-                                        }
-                                    },
-                                }
-                            },
-                        }
-                    },
-                    .collection => |*collection| {
-                        if (collection.name == null) {
+                            }
+                        },
+                        else => {
+                            std.log.err("unexpected token: expected annotation or word but got {s}", .{@tagName(token)});
+                            return error.UnexpectedToken;
+                        },
+                    }
+                },
+                .annotation => |*annotation| {
+                    switch (annotation.expr_state) {
+                        .start => {
                             switch (token) {
-                                inline .string, .word => |name| {
-                                    collection.name = try allocator.dupe(u8, name);
+                                .lparen => {
+                                    annotation.expr_state = .{ .parsing = .{} };
                                 },
                                 else => {
-                                    std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
+                                    std.log.err("unexpected token: expected lparen but got {s}", .{@tagName(token)});
                                     return error.UnexpectedToken;
                                 },
                             }
-                        } else if (collection.member_state == null) {
+                        },
+                        .parsing => |*parser| {
+                            const res = try parser.pushToken(allocator, token);
+                            if (res.expr) |expr| {
+                                annotation.expr_state = .{ .end = expr };
+                            }
+
+                            return .{ .save = res.save };
+                        },
+                        .end => |expr| {
+                            switch (token) {
+                                .rparen => {
+                                    try self.annotations.append(allocator, .{
+                                        .name = annotation.name,
+                                        .value = expr,
+                                    });
+
+                                    self.state = .empty;
+                                },
+                                else => {
+                                    std.log.err("unexpected token: expected rparen but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                },
+                            }
+                        },
+                    }
+                },
+                .access_provider => |*access_provider| {
+                    switch (access_provider.*) {
+                        .start => {
+                            switch (token) {
+                                .word => |word| {
+                                    if (!std.mem.eql(u8, word, "provider")) {
+                                        std.log.err("unexpected token: expected word to equal \"provider\" but got \"{s}\"", .{word});
+                                        return error.UnexpectedToken;
+                                    }
+
+                                    access_provider.* = .before_name;
+                                },
+                                else => {
+                                    std.log.err("unexpected token: expected word but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                },
+                            }
+                        },
+                        .before_name => {
+                            switch (token) {
+                                inline .string, .word => |s| {
+                                    access_provider.* = .{ .after_name = try allocator.dupe(u8, s) };
+                                },
+                                else => {
+                                    std.log.err("unexpected token: expected string or word but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                },
+                            }
+                        },
+                        .after_name => |name| {
                             switch (token) {
                                 .lbrace => {
-                                    collection.member_state = .empty;
+                                    access_provider.* = .{ .body = .{ .name = name } };
                                 },
                                 else => {
                                     std.log.err("unexpected token: expected lbrace but got {s}", .{@tagName(token)});
                                     return error.UnexpectedToken;
                                 },
                             }
-                        } else switch (collection.member_state.?) {
-                            .empty => {
-                                switch (token) {
-                                    .eol, .semi => {},
-                                    .word => |word| {
-                                        if (std.meta.stringToEnum(enum { migrations, history_days, document_ttls, ttl_days, index, unique, check, compute }, word)) |keyword| {
-                                            switch (keyword) {
-                                                inline .history_days, .document_ttls, .ttl_days => |kw| collection.member_state = @field(State.Collection.Member, @tagName(kw)),
-                                                inline else => |kw| collection.member_state = @unionInit(State.Collection.Member, @tagName(kw), .{}),
-                                            }
-                                        } else {
-                                            collection.member_state = .{ .field = .{ .name = try allocator.dupe(u8, word) } };
-                                        }
-                                    },
-                                    .string => |str| {
-                                        collection.member_state = .{ .field = .{ .name = try allocator.dupe(u8, str) } };
-                                    },
-                                    .asterisk => {
-                                        collection.member_state = .{ .field = .{ .name = try allocator.dupe(u8, "*") } };
-                                    },
-                                    .rbrace => {
-                                        self.state = .{
-                                            .end = .{
-                                                .collection = .{
-                                                    .name = collection.name.?,
-                                                    .members = try collection.members.toOwnedSlice(allocator),
-                                                },
-                                            },
-                                        };
-                                    },
-                                    else => {
-                                        std.log.err("unexpected token: expected eol, semi, word or string but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    },
-                                }
-                            },
-                            .field => |*field| {
-                                if (field.parser == null and field.type == null) {
-                                    if (token == .colon) {
-                                        field.parser = .{ .type = .{} };
-                                    } else {
-                                        std.log.err("unexpected token: expected colon or equal but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    }
-                                } else if (field.parser == null) {
+                        },
+                        .body => |*body| {
+                            switch (body.state) {
+                                .empty => {
                                     switch (token) {
-                                        .eol, .semi => {
-                                            try collection.members.append(allocator, .{
-                                                .field = .{
-                                                    .name = field.name,
-                                                    .type = field.type.?,
-                                                },
-                                            });
-
-                                            collection.member_state = .empty;
+                                        .semi, .eol => {},
+                                        .word => |word| {
+                                            if (std.meta.stringToEnum(enum { issuer, jwks_uri, role, ttl }, word)) |keyword| {
+                                                switch (keyword) {
+                                                    .issuer => {
+                                                        body.state = .issuer;
+                                                    },
+                                                    .jwks_uri => {
+                                                        body.state = .jwks_uri;
+                                                    },
+                                                    .role => {
+                                                        body.state = .{ .role = .start };
+                                                    },
+                                                    .ttl => {
+                                                        body.state = .ttl;
+                                                    },
+                                                }
+                                            } else {
+                                                std.log.err("unexpected token: expected word to equal \"issuer\", \"jwks_uri\", \"role\" or \"ttl\" but got \"{s}\"", .{word});
+                                                return error.UnexpectedToken;
+                                            }
                                         },
-                                        .equal => {
-                                            field.parser = .{ .expr = .{} };
+                                        .rbrace => {
+                                            body.state = .end;
+                                            return .{ .save = token };
                                         },
                                         else => {
-                                            std.log.err("unexpected token: expected equal but got {s}", .{@tagName(token)});
+                                            std.log.err("unexpected token: expected semi, eol, word or rbrace but got {s}", .{@tagName(token)});
                                             return error.UnexpectedToken;
                                         },
                                     }
-                                } else switch (field.parser.?) {
-                                    .type => |*parser| {
-                                        const res = try parser.pushToken(allocator, token);
-                                        if (res.type) |fql_type| {
-                                            field.type = fql_type;
-                                            field.parser = null;
-                                        }
+                                },
+                                inline .issuer, .jwks_uri, .ttl => |_, tag| {
+                                    switch (token) {
+                                        .string => |str| {
+                                            try body.members.append(
+                                                allocator,
+                                                @unionInit(SchemaDefinition.AccessProvider.Member, @tagName(tag), try allocator.dupe(u8, str)),
+                                            );
 
-                                        return .{ .save = res.save };
-                                    },
-                                    .expr => |*parser| {
-                                        const res = try parser.pushToken(allocator, token);
-                                        if (res.expr) |expr| {
-                                            try collection.members.append(allocator, .{
-                                                .field = .{
-                                                    .name = field.name,
-                                                    .type = field.type.?,
-                                                    .default = expr,
+                                            body.state = .empty;
+                                        },
+                                        else => {
+                                            std.log.err("unexpected token: expected string but got {s}", .{@tagName(token)});
+                                            return error.UnexpectedToken;
+                                        },
+                                    }
+                                },
+                                .role => |*role| {
+                                    switch (role.*) {
+                                        .start => {
+                                            switch (token) {
+                                                inline .word, .string => |s| {
+                                                    role.* = .{ .name = try allocator.dupe(u8, s) };
                                                 },
-                                            });
+                                                else => {
+                                                    std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
+                                                    return error.UnexpectedToken;
+                                                },
+                                            }
+                                        },
+                                        .name => |name| {
+                                            switch (token) {
+                                                .lbrace => {
+                                                    role.* = .{ .block = name };
+                                                },
+                                                .eol, .semi => {
+                                                    try body.members.append(allocator, .{ .role = .{ .name = name } });
 
-                                            collection.member_state = .empty;
+                                                    body.state = .empty;
+                                                },
+                                                else => {
+                                                    std.log.err("unexpected token: expected lbrace, eol or semi but got {s}", .{@tagName(token)});
+                                                    return error.UnexpectedToken;
+                                                },
+                                            }
+                                        },
+                                        .block => |name| {
+                                            switch (token) {
+                                                .eol, .semi => {},
+                                                .word => |word| {
+                                                    if (!std.mem.eql(u8, word, "predicate")) {
+                                                        std.log.err("unexpected token: expected word to equal \"predicate\" but got \"{s}\"", .{word});
+                                                        return error.UnexpectedToken;
+                                                    }
+
+                                                    role.* = .{ .predicate = .{ .name = name } };
+                                                },
+                                                else => {
+                                                    std.log.err("unexpected token: expected eol, semi or word but got {s}", .{@tagName(token)});
+                                                    return error.UnexpectedToken;
+                                                },
+                                            }
+                                        },
+                                        .predicate => |*predicate| {
+                                            const res = try predicate.expr.pushToken(allocator, token);
+                                            if (res.expr) |expr| {
+                                                role.* = .{
+                                                    .end = .{
+                                                        .name = predicate.name,
+                                                        .expr = expr,
+                                                    },
+                                                };
+                                            }
+
+                                            return .{ .save = res.save };
+                                        },
+                                        .end => |end| {
+                                            switch (token) {
+                                                .eol, .semi => {},
+                                                .rbrace => {
+                                                    try body.members.append(allocator, .{
+                                                        .role = .{
+                                                            .name = end.name,
+                                                            .predicate = end.expr,
+                                                        },
+                                                    });
+
+                                                    body.state = .end;
+                                                },
+                                                else => {
+                                                    std.log.err("unexpected token: expected rbrace but got {s}", .{@tagName(token)});
+                                                    return error.UnexpectedToken;
+                                                },
+                                            }
+                                        },
+                                    }
+                                },
+                                .end => {
+                                    switch (token) {
+                                        .semi, .eol => {
+                                            body.state = .empty;
+                                        },
+                                        .rbrace => {
+                                            self.state = .{
+                                                .end = .{
+                                                    .access_provider = .{
+                                                        .name = body.name,
+                                                        .members = try body.members.toOwnedSlice(allocator),
+                                                    },
+                                                },
+                                            };
+                                        },
+                                        else => {
+                                            std.log.err("unexpected token: expected word or rbrace but got {s}", .{@tagName(token)});
+                                            return error.UnexpectedToken;
+                                        },
+                                    }
+                                },
+                            }
+                        },
+                    }
+                },
+                .collection => |*collection| {
+                    if (collection.name == null) {
+                        switch (token) {
+                            inline .string, .word => |name| {
+                                collection.name = try allocator.dupe(u8, name);
+                            },
+                            else => {
+                                std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
+                                return error.UnexpectedToken;
+                            },
+                        }
+                    } else if (collection.member_state == null) {
+                        switch (token) {
+                            .lbrace => {
+                                collection.member_state = .empty;
+                            },
+                            else => {
+                                std.log.err("unexpected token: expected lbrace but got {s}", .{@tagName(token)});
+                                return error.UnexpectedToken;
+                            },
+                        }
+                    } else switch (collection.member_state.?) {
+                        .empty => {
+                            switch (token) {
+                                .eol, .semi => {},
+                                .word => |word| {
+                                    if (std.meta.stringToEnum(enum { migrations, history_days, document_ttls, ttl_days, index, unique, check, compute }, word)) |keyword| {
+                                        switch (keyword) {
+                                            inline .history_days, .document_ttls, .ttl_days => |kw| collection.member_state = @field(State.Collection.Member, @tagName(kw)),
+                                            inline else => |kw| collection.member_state = @unionInit(State.Collection.Member, @tagName(kw), .{}),
                                         }
+                                    } else {
+                                        collection.member_state = .{ .field = .{ .name = try allocator.dupe(u8, word) } };
+                                    }
+                                },
+                                .string => |str| {
+                                    collection.member_state = .{ .field = .{ .name = try allocator.dupe(u8, str) } };
+                                },
+                                .asterisk => {
+                                    collection.member_state = .{ .field = .{ .name = try allocator.dupe(u8, "*") } };
+                                },
+                                .rbrace => {
+                                    self.state = .{
+                                        .end = .{
+                                            .collection = .{
+                                                .name = collection.name.?,
+                                                .members = try collection.members.toOwnedSlice(allocator),
+                                            },
+                                        },
+                                    };
+                                },
+                                else => {
+                                    std.log.err("unexpected token: expected eol, semi, word or string but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                },
+                            }
+                        },
+                        .field => |*field| {
+                            if (field.parser == null and field.type == null) {
+                                if (token == .colon) {
+                                    field.parser = .{ .type = .{} };
+                                } else {
+                                    std.log.err("unexpected token: expected colon or equal but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                }
+                            } else if (field.parser == null) {
+                                switch (token) {
+                                    .eol, .semi => {
+                                        try collection.members.append(allocator, .{
+                                            .field = .{
+                                                .name = field.name,
+                                                .type = field.type.?,
+                                            },
+                                        });
 
-                                        return .{ .save = res.save };
+                                        collection.member_state = .empty;
+                                    },
+                                    .equal => {
+                                        field.parser = .{ .expr = .{} };
+                                    },
+                                    else => {
+                                        std.log.err("unexpected token: expected equal but got {s}", .{@tagName(token)});
+                                        return error.UnexpectedToken;
                                     },
                                 }
-                            },
-                            .migrations => |*migrations| {
-                                switch (migrations.state) {
+                            } else switch (field.parser.?) {
+                                .type => |*parser| {
+                                    const res = try parser.pushToken(allocator, token);
+                                    if (res.type) |fql_type| {
+                                        field.type = fql_type;
+                                        field.parser = null;
+                                    }
+
+                                    return .{ .save = res.save };
+                                },
+                                .expr => |*parser| {
+                                    const res = try parser.pushToken(allocator, token);
+                                    if (res.expr) |expr| {
+                                        try collection.members.append(allocator, .{
+                                            .field = .{
+                                                .name = field.name,
+                                                .type = field.type.?,
+                                                .default = expr,
+                                            },
+                                        });
+
+                                        collection.member_state = .empty;
+                                    }
+
+                                    return .{ .save = res.save };
+                                },
+                            }
+                        },
+                        .migrations => |*migrations| {
+                            switch (migrations.state) {
+                                .before_lbrace => {
+                                    switch (token) {
+                                        .lbrace => {
+                                            migrations.state = .start;
+                                        },
+                                        else => {
+                                            std.log.err("unexpected token: expected lbrace but got {s}", .{@tagName(token)});
+                                            return error.UnexpectedToken;
+                                        },
+                                    }
+                                },
+                                .start => {
+                                    switch (token) {
+                                        .eol, .semi => {},
+                                        .rbrace => {
+                                            try collection.members.append(allocator, .{ .migrations = try migrations.statements.toOwnedSlice(allocator) });
+                                            collection.member_state = .empty;
+                                        },
+                                        .word => |word| {
+                                            if (std.meta.stringToEnum(std.meta.Tag(Collection.Member.Migration), word)) |tag| {
+                                                migrations.state = .{ .first_expr = .{ .tag = tag } };
+                                            } else {
+                                                std.log.err("unexpected token: expected word to equal \"add\", \"backfill\", \"drop\", \"move\", \"move_conflicts\", \"move_wildcard\" or \"split\" but got \"{s}\"", .{@tagName(token)});
+                                                return error.UnexpectedToken;
+                                            }
+                                        },
+                                        else => {
+                                            std.log.err("unexpected token: expected rbrace or word but got {s}", .{@tagName(token)});
+                                            return error.UnexpectedToken;
+                                        },
+                                    }
+                                },
+                                .first_expr => |*first_expr| {
+                                    const res = try first_expr.parser.pushToken(allocator, token);
+                                    if (res.expr) |expr| {
+                                        switch (first_expr.tag) {
+                                            inline else => |tag| {
+                                                if (std.meta.FieldType(SchemaDefinition.Collection.Member.Migration, tag) == FQLExpression) {
+                                                    try migrations.statements.append(
+                                                        allocator,
+                                                        @unionInit(SchemaDefinition.Collection.Member.Migration, @tagName(tag), expr),
+                                                    );
+                                                    migrations.state = .start;
+                                                } else {
+                                                    migrations.state = .{
+                                                        .before_arrow = .{
+                                                            .tag = std.meta.stringToEnum(@TypeOf(migrations.state.before_arrow.tag), @tagName(tag)).?,
+                                                            .first_expr = expr,
+                                                        },
+                                                    };
+                                                }
+                                            },
+                                        }
+                                    }
+
+                                    return .{ .save = res.save };
+                                },
+                                .before_arrow => |before_arrow| {
+                                    migrations.state = switch (before_arrow.tag) {
+                                        inline else => |tag| @unionInit(
+                                            @TypeOf(migrations.state),
+                                            @tagName(tag),
+                                            .{
+                                                .first_expr = before_arrow.first_expr,
+                                            },
+                                        ),
+                                    };
+                                },
+                                inline .move, .backfill => |*move_or_backfill, tag| {
+                                    const res = try move_or_backfill.parser.pushToken(allocator, token);
+                                    if (res.expr) |expr| {
+                                        try migrations.statements.append(
+                                            allocator,
+                                            switch (tag) {
+                                                .move => .{
+                                                    .move = .{
+                                                        .old_name = move_or_backfill.first_expr,
+                                                        .new_name = expr,
+                                                    },
+                                                },
+                                                .backfill => .{
+                                                    .backfill = .{
+                                                        .name = move_or_backfill.first_expr,
+                                                        .value = expr,
+                                                    },
+                                                },
+                                                else => unreachable,
+                                            },
+                                        );
+
+                                        migrations.state = .start;
+                                    }
+
+                                    return .{ .save = res.save };
+                                },
+                                .split => |*split| {
+                                    if (split.parser) |*parser| {
+                                        const res = try parser.pushToken(allocator, token);
+                                        if (res.expr) |expr| {
+                                            try split.after.append(allocator, expr);
+                                            split.parser = null;
+                                        }
+
+                                        return .{ .save = res.save };
+                                    } else {
+                                        switch (token) {
+                                            .eol, .semi => {
+                                                try migrations.statements.append(allocator, .{
+                                                    .split = .{
+                                                        .old_name = split.first_expr,
+                                                        .new_names = try split.after.toOwnedSlice(allocator),
+                                                    },
+                                                });
+
+                                                migrations.state = .start;
+                                            },
+                                            .comma => {
+                                                split.parser = .{};
+                                            },
+                                            else => {
+                                                std.log.err("unexpected token: expected eol, semi or comma but got {s}", .{@tagName(token)});
+                                                return error.UnexpectedToken;
+                                            },
+                                        }
+                                    }
+                                },
+                            }
+                        },
+                        .history_days => {
+                            switch (token) {
+                                .number => |num| {
+                                    try collection.members.append(allocator, .{ .history_days = try allocator.dupe(u8, num) });
+                                    collection.member_state = .empty;
+                                },
+                                else => {
+                                    std.log.err("unexpected token: expected number but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                },
+                            }
+                        },
+                        .document_ttls => {
+                            switch (token) {
+                                .word => |word| {
+                                    if (std.meta.stringToEnum(enum { true, false, null }, word)) |keyword| {
+                                        try collection.members.append(allocator, .{
+                                            .document_ttls = switch (keyword) {
+                                                .true => true,
+                                                .false => false,
+                                                .null => null,
+                                            },
+                                        });
+                                        collection.member_state = .empty;
+                                    } else {
+                                        std.log.err("unexpected token: expected word to equal \"true\", \"false\" or \"null\" but got {s}", .{word});
+                                        return error.UnexpectedToken;
+                                    }
+                                },
+                                else => {
+                                    std.log.err("unexpected token: expected word but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                },
+                            }
+                        },
+                        .ttl_days => {
+                            switch (token) {
+                                .number => |num| {
+                                    try collection.members.append(allocator, .{
+                                        .ttl_days = try allocator.dupe(u8, num),
+                                    });
+                                    collection.member_state = .empty;
+                                },
+                                else => {
+                                    std.log.err("unexpected token: expected number but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                },
+                            }
+                        },
+                        .index => |*index| {
+                            if (index.name == null) {
+                                switch (token) {
+                                    inline .string, .word => |name| {
+                                        index.name = try allocator.dupe(u8, name);
+                                    },
+                                    else => {
+                                        std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
+                                        return error.UnexpectedToken;
+                                    },
+                                }
+                            } else {
+                                switch (index.state) {
                                     .before_lbrace => {
                                         switch (token) {
                                             .lbrace => {
-                                                migrations.state = .start;
+                                                index.state = .start;
                                             },
                                             else => {
                                                 std.log.err("unexpected token: expected lbrace but got {s}", .{@tagName(token)});
@@ -1373,903 +1572,666 @@ pub const SchemaDefinition = union(enum) {
                                     },
                                     .start => {
                                         switch (token) {
-                                            .eol, .semi => {},
+                                            .eol => {},
                                             .rbrace => {
-                                                try collection.members.append(allocator, .{ .migrations = try migrations.statements.toOwnedSlice(allocator) });
+                                                try collection.members.append(allocator, .{
+                                                    .index = .{
+                                                        .name = index.name.?,
+                                                        .members = try index.members.toOwnedSlice(allocator),
+                                                    },
+                                                });
+
                                                 collection.member_state = .empty;
                                             },
                                             .word => |word| {
-                                                if (std.meta.stringToEnum(std.meta.Tag(Collection.Member.Migration), word)) |tag| {
-                                                    migrations.state = .{ .first_expr = .{ .tag = tag } };
+                                                if (std.meta.stringToEnum(@TypeOf(index.state.property.type), word)) |keyword| {
+                                                    index.state = .{ .property = .{ .type = keyword } };
                                                 } else {
-                                                    std.log.err("unexpected token: expected word to equal \"add\", \"backfill\", \"drop\", \"move\", \"move_conflicts\", \"move_wildcard\" or \"split\" but got \"{s}\"", .{@tagName(token)});
+                                                    std.log.err("unexpected token: expected word to equal \"terms\" or \"values\" but got {s}", .{word});
                                                     return error.UnexpectedToken;
                                                 }
                                             },
                                             else => {
-                                                std.log.err("unexpected token: expected rbrace or word but got {s}", .{@tagName(token)});
+                                                std.log.err("unexpected token: expected eol, rbrace or word but got {s}", .{@tagName(token)});
                                                 return error.UnexpectedToken;
                                             },
                                         }
                                     },
-                                    .first_expr => |*first_expr| {
-                                        const res = try first_expr.parser.pushToken(allocator, token);
-                                        if (res.expr) |expr| {
-                                            switch (first_expr.tag) {
-                                                inline else => |tag| {
-                                                    if (std.meta.FieldType(SchemaDefinition.Collection.Member.Migration, tag) == FQLExpression) {
-                                                        try migrations.statements.append(
-                                                            allocator,
-                                                            @unionInit(SchemaDefinition.Collection.Member.Migration, @tagName(tag), expr),
-                                                        );
-                                                        migrations.state = .start;
-                                                    } else {
-                                                        migrations.state = .{
-                                                            .before_arrow = .{
-                                                                .tag = std.meta.stringToEnum(@TypeOf(migrations.state.before_arrow.tag), @tagName(tag)).?,
-                                                                .first_expr = expr,
-                                                            },
-                                                        };
-                                                    }
-                                                },
-                                            }
-                                        }
-
-                                        return .{ .save = res.save };
-                                    },
-                                    .before_arrow => |before_arrow| {
-                                        migrations.state = switch (before_arrow.tag) {
-                                            inline else => |tag| @unionInit(
-                                                @TypeOf(migrations.state),
-                                                @tagName(tag),
-                                                .{
-                                                    .first_expr = before_arrow.first_expr,
-                                                },
-                                            ),
-                                        };
-                                    },
-                                    inline .move, .backfill => |*move_or_backfill, tag| {
-                                        const res = try move_or_backfill.parser.pushToken(allocator, token);
-                                        if (res.expr) |expr| {
-                                            try migrations.statements.append(
-                                                allocator,
-                                                switch (tag) {
-                                                    .move => .{
-                                                        .move = .{
-                                                            .old_name = move_or_backfill.first_expr,
-                                                            .new_name = expr,
-                                                        },
+                                    .property => |*property| {
+                                        switch (property.state) {
+                                            .before_lbracket => {
+                                                switch (token) {
+                                                    .lbracket => {
+                                                        property.state = .start;
                                                     },
-                                                    .backfill => .{
-                                                        .backfill = .{
-                                                            .name = move_or_backfill.first_expr,
-                                                            .value = expr,
-                                                        },
+                                                    else => {
+                                                        std.log.err("unexpected token: expected lbracket but got {s}", .{@tagName(token)});
+                                                        return error.UnexpectedToken;
                                                     },
-                                                    else => unreachable,
-                                                },
-                                            );
+                                                }
+                                            },
+                                            .start => {
+                                                switch (token) {
+                                                    .rbracket => {
+                                                        switch (property.type) {
+                                                            inline else => |tag| try index.members.append(
+                                                                allocator,
+                                                                @unionInit(
+                                                                    SchemaDefinition.Collection.Member.Index.Member,
+                                                                    @tagName(tag),
+                                                                    try property.fields.toOwnedSlice(allocator),
+                                                                ),
+                                                            ),
+                                                        }
 
-                                            migrations.state = .start;
-                                        }
+                                                        index.state = .start;
+                                                    },
+                                                    else => {
+                                                        property.state = .{ .parsing = .{} };
+                                                        return .{ .save = token };
+                                                    },
+                                                }
+                                            },
+                                            .parsing => |*parser| {
+                                                const res = try parser.pushToken(allocator, token);
+                                                if (res.expr) |expr| {
+                                                    try property.fields.append(allocator, expr);
+                                                    property.state = .end;
+                                                }
 
-                                        return .{ .save = res.save };
-                                    },
-                                    .split => |*split| {
-                                        if (split.parser) |*parser| {
-                                            const res = try parser.pushToken(allocator, token);
-                                            if (res.expr) |expr| {
-                                                try split.after.append(allocator, expr);
-                                                split.parser = null;
-                                            }
-
-                                            return .{ .save = res.save };
-                                        } else {
-                                            switch (token) {
-                                                .eol, .semi => {
-                                                    try migrations.statements.append(allocator, .{
-                                                        .split = .{
-                                                            .old_name = split.first_expr,
-                                                            .new_names = try split.after.toOwnedSlice(allocator),
-                                                        },
-                                                    });
-
-                                                    migrations.state = .start;
-                                                },
-                                                .comma => {
-                                                    split.parser = .{};
-                                                },
-                                                else => {
-                                                    std.log.err("unexpected token: expected eol, semi or comma but got {s}", .{@tagName(token)});
-                                                    return error.UnexpectedToken;
-                                                },
-                                            }
+                                                return .{ .save = res.save };
+                                            },
+                                            .end => {
+                                                switch (token) {
+                                                    .rbracket => {
+                                                        property.state = .start;
+                                                        return .{ .save = token };
+                                                    },
+                                                    .comma => {
+                                                        property.state = .{ .parsing = .{} };
+                                                    },
+                                                    else => {
+                                                        std.log.err("unexpected token: expected rbracket or comma but got {s}", .{@tagName(token)});
+                                                        return error.UnexpectedToken;
+                                                    },
+                                                }
+                                            },
                                         }
                                     },
                                 }
-                            },
-                            .history_days => {
-                                switch (token) {
-                                    .number => |num| {
-                                        try collection.members.append(allocator, .{ .history_days = try allocator.dupe(u8, num) });
-                                        collection.member_state = .empty;
-                                    },
-                                    else => {
-                                        std.log.err("unexpected token: expected number but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    },
-                                }
-                            },
-                            .document_ttls => {
-                                switch (token) {
-                                    .word => |word| {
-                                        if (std.meta.stringToEnum(enum { true, false, null }, word)) |keyword| {
+                            }
+                        },
+                        .unique => |*unique| {
+                            switch (unique.state) {
+                                .before_lbracket => {
+                                    switch (token) {
+                                        .lbracket => {
+                                            unique.state = .start;
+                                        },
+                                        else => {
+                                            std.log.err("unexpected token: expected lbracket but got {s}", .{@tagName(token)});
+                                            return error.UnexpectedToken;
+                                        },
+                                    }
+                                },
+                                .start => {
+                                    switch (token) {
+                                        .rbracket => {
                                             try collection.members.append(allocator, .{
-                                                .document_ttls = switch (keyword) {
-                                                    .true => true,
-                                                    .false => false,
-                                                    .null => null,
+                                                .unique_constraint = .{
+                                                    .terms = try unique.terms.toOwnedSlice(allocator),
                                                 },
                                             });
                                             collection.member_state = .empty;
-                                        } else {
-                                            std.log.err("unexpected token: expected word to equal \"true\", \"false\" or \"null\" but got {s}", .{word});
-                                            return error.UnexpectedToken;
-                                        }
-                                    },
-                                    else => {
-                                        std.log.err("unexpected token: expected word but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    },
-                                }
-                            },
-                            .ttl_days => {
-                                switch (token) {
-                                    .number => |num| {
-                                        try collection.members.append(allocator, .{
-                                            .ttl_days = try allocator.dupe(u8, num),
-                                        });
-                                        collection.member_state = .empty;
-                                    },
-                                    else => {
-                                        std.log.err("unexpected token: expected number but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    },
-                                }
-                            },
-                            .index => |*index| {
-                                if (index.name == null) {
-                                    switch (token) {
-                                        inline .string, .word => |name| {
-                                            index.name = try allocator.dupe(u8, name);
                                         },
                                         else => {
-                                            std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
-                                            return error.UnexpectedToken;
+                                            unique.state = .{ .parsing = .{} };
+                                            return .{ .save = token };
                                         },
                                     }
-                                } else {
-                                    switch (index.state) {
-                                        .before_lbrace => {
-                                            switch (token) {
-                                                .lbrace => {
-                                                    index.state = .start;
-                                                },
-                                                else => {
-                                                    std.log.err("unexpected token: expected lbrace but got {s}", .{@tagName(token)});
-                                                    return error.UnexpectedToken;
-                                                },
-                                            }
-                                        },
-                                        .start => {
-                                            switch (token) {
-                                                .eol => {},
-                                                .rbrace => {
-                                                    try collection.members.append(allocator, .{
-                                                        .index = .{
-                                                            .name = index.name.?,
-                                                            .members = try index.members.toOwnedSlice(allocator),
-                                                        },
-                                                    });
-
-                                                    collection.member_state = .empty;
-                                                },
-                                                .word => |word| {
-                                                    if (std.meta.stringToEnum(@TypeOf(index.state.property.type), word)) |keyword| {
-                                                        index.state = .{ .property = .{ .type = keyword } };
-                                                    } else {
-                                                        std.log.err("unexpected token: expected word to equal \"terms\" or \"values\" but got {s}", .{word});
-                                                        return error.UnexpectedToken;
-                                                    }
-                                                },
-                                                else => {
-                                                    std.log.err("unexpected token: expected eol, rbrace or word but got {s}", .{@tagName(token)});
-                                                    return error.UnexpectedToken;
-                                                },
-                                            }
-                                        },
-                                        .property => |*property| {
-                                            switch (property.state) {
-                                                .before_lbracket => {
-                                                    switch (token) {
-                                                        .lbracket => {
-                                                            property.state = .start;
-                                                        },
-                                                        else => {
-                                                            std.log.err("unexpected token: expected lbracket but got {s}", .{@tagName(token)});
-                                                            return error.UnexpectedToken;
-                                                        },
-                                                    }
-                                                },
-                                                .start => {
-                                                    switch (token) {
-                                                        .rbracket => {
-                                                            switch (property.type) {
-                                                                inline else => |tag| try index.members.append(
-                                                                    allocator,
-                                                                    @unionInit(
-                                                                        SchemaDefinition.Collection.Member.Index.Member,
-                                                                        @tagName(tag),
-                                                                        try property.fields.toOwnedSlice(allocator),
-                                                                    ),
-                                                                ),
-                                                            }
-
-                                                            index.state = .start;
-                                                        },
-                                                        else => {
-                                                            property.state = .{ .parsing = .{} };
-                                                            return .{ .save = token };
-                                                        },
-                                                    }
-                                                },
-                                                .parsing => |*parser| {
-                                                    const res = try parser.pushToken(allocator, token);
-                                                    if (res.expr) |expr| {
-                                                        try property.fields.append(allocator, expr);
-                                                        property.state = .end;
-                                                    }
-
-                                                    return .{ .save = res.save };
-                                                },
-                                                .end => {
-                                                    switch (token) {
-                                                        .rbracket => {
-                                                            property.state = .start;
-                                                            return .{ .save = token };
-                                                        },
-                                                        .comma => {
-                                                            property.state = .{ .parsing = .{} };
-                                                        },
-                                                        else => {
-                                                            std.log.err("unexpected token: expected rbracket or comma but got {s}", .{@tagName(token)});
-                                                            return error.UnexpectedToken;
-                                                        },
-                                                    }
-                                                },
-                                            }
-                                        },
-                                    }
-                                }
-                            },
-                            .unique => |*unique| {
-                                switch (unique.state) {
-                                    .before_lbracket => {
-                                        switch (token) {
-                                            .lbracket => {
-                                                unique.state = .start;
-                                            },
-                                            else => {
-                                                std.log.err("unexpected token: expected lbracket but got {s}", .{@tagName(token)});
-                                                return error.UnexpectedToken;
-                                            },
-                                        }
-                                    },
-                                    .start => {
-                                        switch (token) {
-                                            .rbracket => {
-                                                try collection.members.append(allocator, .{
-                                                    .unique_constraint = .{
-                                                        .terms = try unique.terms.toOwnedSlice(allocator),
-                                                    },
-                                                });
-                                                collection.member_state = .empty;
-                                            },
-                                            else => {
-                                                unique.state = .{ .parsing = .{} };
-                                                return .{ .save = token };
-                                            },
-                                        }
-                                    },
-                                    .parsing => |*parser| {
-                                        const res = try parser.pushToken(allocator, token);
-                                        if (res.expr) |expr| {
-                                            try unique.terms.append(allocator, expr);
-                                            unique.state = .end;
-                                        }
-
-                                        return .{ .save = res.save };
-                                    },
-                                    .end => {
-                                        switch (token) {
-                                            .rbracket => {
-                                                unique.state = .start;
-                                                return .{ .save = token };
-                                            },
-                                            .comma => {
-                                                unique.state = .start;
-                                            },
-                                            else => {
-                                                std.log.err("unexpected token: expected number but got {s}", .{@tagName(token)});
-                                                return error.UnexpectedToken;
-                                            },
-                                        }
-                                    },
-                                }
-                            },
-                            .check => |*check| {
-                                if (check.name == null) {
-                                    switch (token) {
-                                        inline .string, .word => |name| {
-                                            check.name = try allocator.dupe(u8, name);
-                                        },
-                                        else => {
-                                            std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
-                                            return error.UnexpectedToken;
-                                        },
-                                    }
-                                } else {
-                                    const res = try check.parser.pushToken(allocator, token);
+                                },
+                                .parsing => |*parser| {
+                                    const res = try parser.pushToken(allocator, token);
                                     if (res.expr) |expr| {
-                                        try collection.members.append(allocator, .{
-                                            .check_constraint = .{
-                                                .name = check.name.?,
-                                                .predicate = expr,
-                                            },
-                                        });
-
-                                        collection.member_state = .empty;
+                                        try unique.terms.append(allocator, expr);
+                                        unique.state = .end;
                                     }
 
                                     return .{ .save = res.save };
-                                }
-                            },
-                            .compute => |*compute| {
-                                if (compute.name == null) {
+                                },
+                                .end => {
                                     switch (token) {
-                                        inline .string, .word => |name| {
-                                            compute.name = try allocator.dupe(u8, name);
+                                        .rbracket => {
+                                            unique.state = .start;
+                                            return .{ .save = token };
+                                        },
+                                        .comma => {
+                                            unique.state = .start;
                                         },
                                         else => {
-                                            std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
+                                            std.log.err("unexpected token: expected number but got {s}", .{@tagName(token)});
                                             return error.UnexpectedToken;
                                         },
                                     }
-                                } else if (compute.parser == null) {
-                                    if (compute.type == null and token == .colon) {
-                                        compute.parser = .{ .type = .{} };
-                                    } else if (token == .equal) {
-                                        compute.parser = .{ .expr = .{} };
-                                    } else {
-                                        if (compute.type == null) {
-                                            std.log.err("unexpected token: expected colon or equal but got {s}", .{@tagName(token)});
-                                        } else {
-                                            std.log.err("unexpected token: expected equal but got {s}", .{@tagName(token)});
-                                        }
-
-                                        return error.UnexpectedToken;
-                                    }
-                                } else {
-                                    switch (compute.parser.?) {
-                                        .type => |*parser| {
-                                            const res = try parser.pushToken(allocator, token);
-                                            if (res.type) |fql_type| {
-                                                compute.type = fql_type;
-                                                compute.parser = null;
-                                            }
-
-                                            return .{ .save = res.save };
-                                        },
-                                        .expr => |*parser| {
-                                            const res = try parser.pushToken(allocator, token);
-                                            if (res.expr) |expr| {
-                                                try collection.members.append(allocator, .{
-                                                    .computed_field = .{
-                                                        .name = compute.name.?,
-                                                        .type = compute.type,
-                                                        .function = expr,
-                                                    },
-                                                });
-
-                                                collection.member_state = .empty;
-                                            }
-
-                                            return .{ .save = res.save };
-                                        },
-                                    }
-                                }
-                            },
-                        }
-                    },
-                    .role => |*role| {
-                        if (role.name == null) {
-                            switch (token) {
-                                inline .string, .word => |name| {
-                                    role.name = try allocator.dupe(u8, name);
-                                },
-                                else => {
-                                    std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
-                                    return error.UnexpectedToken;
                                 },
                             }
-                        } else if (role.member_state == null) {
-                            switch (token) {
-                                .lbrace => {
-                                    role.member_state = .empty;
-                                },
-                                else => {
-                                    std.log.err("unexpected token: expected lbrace but got {s}", .{@tagName(token)});
-                                    return error.UnexpectedToken;
-                                },
-                            }
-                        } else switch (role.member_state.?) {
-                            .empty => {
+                        },
+                        .check => |*check| {
+                            if (check.name == null) {
                                 switch (token) {
-                                    .eol, .semi => {},
-                                    .word => |word| {
-                                        if (std.meta.stringToEnum(enum { membership, privileges }, word)) |keyword| {
-                                            switch (keyword) {
-                                                inline else => |kw| role.member_state = @field(@TypeOf(role.member_state.?), @tagName(kw)),
-                                            }
-                                        } else {
-                                            std.log.err("unexpected token: word to equal \"membership\" or \"privileges\" but got {s}", .{word});
-                                            return error.UnexpectedToken;
-                                        }
-                                    },
-                                    .rbrace => {
-                                        self.state = .{
-                                            .end = .{
-                                                .role = .{
-                                                    .name = role.name.?,
-                                                    .members = try role.members.toOwnedSlice(allocator),
-                                                },
-                                            },
-                                        };
-                                    },
-                                    else => {
-                                        std.log.err("unexpected token: expected eol, semi or word but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    },
-                                }
-                            },
-                            .membership => {
-                                switch (token) {
-                                    inline .string, .word => |collection| {
-                                        role.member_state = .{ .membership_collection = try allocator.dupe(u8, collection) };
-                                    },
-                                    else => {
-                                        std.log.err("unexpected token: expected string or word but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    },
-                                }
-                            },
-                            .membership_collection => |collection| {
-                                switch (token) {
-                                    .eol, .semi => {
-                                        try role.members.append(allocator, .{ .membership = .{ .collection = collection } });
-                                        role.member_state = .empty;
-                                    },
-                                    .lbrace => {
-                                        role.member_state = .{ .membership_block = .{ .collection = collection } };
-                                    },
-                                    else => {
-                                        std.log.err("unexpected token: expected eol, semi or lbrace but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    },
-                                }
-                            },
-                            .membership_block => |*membership_block| {
-                                switch (membership_block.state) {
-                                    .start => {
-                                        switch (token) {
-                                            .eol, .semi => {},
-                                            .word => |word| {
-                                                if (std.mem.eql(u8, word, "predicate")) {
-                                                    membership_block.state = .{ .predicate = .{} };
-                                                } else {
-                                                    std.log.err("unexpected token: expected word to equal \"predicate\" but got {s}", .{word});
-                                                    return error.UnexpectedToken;
-                                                }
-                                            },
-                                            else => {
-                                                std.log.err("unexpected token: expected eol, semi or word but got {s}", .{@tagName(token)});
-                                                return error.UnexpectedToken;
-                                            },
-                                        }
-                                    },
-                                    .predicate => |*expr_parser| {
-                                        const res = try expr_parser.pushToken(allocator, token);
-                                        if (res.expr) |expr| {
-                                            membership_block.state = .{ .end = expr };
-                                        }
-                                        return .{ .save = res.save };
-                                    },
-                                    .end => |predicate| {
-                                        switch (token) {
-                                            .eol, .semi => {},
-                                            .rbrace => {
-                                                try role.members.append(allocator, .{
-                                                    .membership = .{
-                                                        .collection = membership_block.collection,
-                                                        .predicate = predicate,
-                                                    },
-                                                });
-                                                role.member_state = .empty;
-                                            },
-                                            else => {
-                                                std.log.err("unexpected token: expected rbrace but got {s}", .{@tagName(token)});
-                                                return error.UnexpectedToken;
-                                            },
-                                        }
-                                    },
-                                }
-                            },
-                            .privileges => {
-                                switch (token) {
-                                    inline .string, .word => |resource| {
-                                        role.member_state = .{ .privileges_resource = try allocator.dupe(u8, resource) };
-                                    },
-                                    else => {
-                                        std.log.err("unexpected token: expected string or word but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    },
-                                }
-                            },
-                            .privileges_resource => |resource| {
-                                switch (token) {
-                                    .lbrace => {
-                                        role.member_state = .{ .privileges_block = .{ .resource = resource } };
-                                    },
-                                    else => {
-                                        std.log.err("unexpected token: expected lbrace but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    },
-                                }
-                            },
-                            .privileges_block => |*privileges_block| {
-                                switch (privileges_block.state) {
-                                    .start => {
-                                        switch (token) {
-                                            .eol, .semi => {},
-                                            .rbrace => {
-                                                try role.members.append(allocator, .{
-                                                    .privileges = .{
-                                                        .resource = privileges_block.resource,
-                                                        .actions = try privileges_block.actions.toOwnedSlice(allocator),
-                                                    },
-                                                });
-                                                role.member_state = .empty;
-                                            },
-                                            .word => |word| {
-                                                if (std.meta.stringToEnum(SchemaDefinition.Role.Member.Privileges.Action.Action, word)) |action| {
-                                                    privileges_block.state = .{ .action = action };
-                                                } else {
-                                                    std.log.err("unexpected token: expected word to equal \"predicate\" but got {s}", .{word});
-                                                    return error.UnexpectedToken;
-                                                }
-                                            },
-                                            else => {
-                                                std.log.err("unexpected token: expected eol, semi, rbrace or word but got {s}", .{@tagName(token)});
-                                                return error.UnexpectedToken;
-                                            },
-                                        }
-                                    },
-                                    .action => |action| {
-                                        switch (token) {
-                                            .eol, .semi => {
-                                                try privileges_block.actions.append(allocator, .{ .action = action });
-                                                privileges_block.state = .start;
-                                            },
-                                            .lbrace => {
-                                                privileges_block.state = .{ .action_block = action };
-                                            },
-                                            else => {
-                                                std.log.err("unexpected token: expected eol, semi or lbrace but got {s}", .{@tagName(token)});
-                                                return error.UnexpectedToken;
-                                            },
-                                        }
-                                    },
-                                    .action_block => |action| {
-                                        switch (token) {
-                                            .eol, .semi => {},
-                                            .word => |word| {
-                                                if (std.mem.eql(u8, word, "predicate")) {
-                                                    privileges_block.state = .{ .action_predicate = .{ .action = action } };
-                                                } else {
-                                                    std.log.err("unexpected token: expected word to equal \"predicate\" but got {s}", .{word});
-                                                    return error.UnexpectedToken;
-                                                }
-                                            },
-                                            else => {
-                                                std.log.err("unexpected token: expected eol, semi or word but got {s}", .{@tagName(token)});
-                                                return error.UnexpectedToken;
-                                            },
-                                        }
-                                    },
-                                    .action_predicate => |*action_predicate| {
-                                        const res = try action_predicate.expr_parser.pushToken(allocator, token);
-                                        if (res.expr) |expr| {
-                                            privileges_block.state = .{
-                                                .action_end = .{
-                                                    .action = action_predicate.action,
-                                                    .predicate = expr,
-                                                },
-                                            };
-                                        }
-
-                                        return .{ .save = res.save };
-                                    },
-                                    .action_end => |action| {
-                                        switch (token) {
-                                            .eol, .semi => {},
-                                            .rbrace => {
-                                                try privileges_block.actions.append(allocator, action);
-                                                privileges_block.state = .start;
-                                            },
-                                            else => {
-                                                std.log.err("unexpected token: expected eol, semi or rbrace but got {s}", .{@tagName(token)});
-                                                return error.UnexpectedToken;
-                                            },
-                                        }
-                                    },
-                                }
-                            },
-                        }
-                    },
-                    .function => |*function| {
-                        switch (function.*) {
-                            .start => {
-                                switch (token) {
-                                    inline .string, .word => |s| {
-                                        function.* = .{ .after_name = try allocator.dupe(u8, s) };
+                                    inline .string, .word => |name| {
+                                        check.name = try allocator.dupe(u8, name);
                                     },
                                     else => {
                                         std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
                                         return error.UnexpectedToken;
                                     },
                                 }
-                            },
-                            .after_name => |name| {
-                                switch (token) {
-                                    .lparen => {
-                                        function.* = .{ .params = .{ .name = name } };
-                                    },
-                                    else => {
-                                        std.log.err("unexpected token: expected lparen but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    },
-                                }
-                            },
-                            .params => |*params| {
-                                switch (params.param_state) {
-                                    .start => {
-                                        switch (token) {
-                                            .word => |word| {
-                                                params.param_state = .{ .after_name = try allocator.dupe(u8, word) };
-                                            },
-                                            else => {
-                                                std.log.err("unexpected token: expected word but got {s}", .{@tagName(token)});
-                                                return error.UnexpectedToken;
-                                            },
-                                        }
-                                    },
-                                    .after_name => |name| {
-                                        switch (token) {
-                                            .colon => {
-                                                params.param_state = .{ .before_type = .{ .name = name } };
-                                            },
-                                            .rparen, .comma => {
-                                                try params.params.append(allocator, .{ .name = name });
-                                                params.param_state = .end;
-                                                return .{ .save = token };
-                                            },
-                                            else => {
-                                                std.log.err("unexpected token: expected colon, rparen or comma but got {s}", .{@tagName(token)});
-                                                return error.UnexpectedToken;
-                                            },
-                                        }
-                                    },
-                                    .before_type => |*before_type| {
-                                        const res = try before_type.type_parser.pushToken(allocator, token);
-                                        if (res.type) |fql_type| {
-                                            try params.params.append(allocator, .{
-                                                .name = before_type.name,
-                                                .type = fql_type,
-                                            });
-                                            params.param_state = .end;
-                                        }
-
-                                        return .{ .save = res.save };
-                                    },
-                                    .end => {
-                                        switch (token) {
-                                            .comma => {
-                                                params.param_state = .start;
-                                            },
-                                            .rparen => {
-                                                function.* = .{
-                                                    .before_body = .{
-                                                        .name = params.name,
-                                                        .params = try params.params.toOwnedSlice(allocator),
-                                                    },
-                                                };
-                                            },
-                                            else => {
-                                                std.log.err("unexpected token: expected rparen or comma but got {s}", .{@tagName(token)});
-                                                return error.UnexpectedToken;
-                                            },
-                                        }
-                                    },
-                                }
-                            },
-                            .return_type => |*return_type| {
-                                const res = try return_type.type_parser.pushToken(allocator, token);
-                                if (res.type) |fql_type| {
-                                    function.* = .{
-                                        .before_body = .{
-                                            .name = return_type.name,
-                                            .params = return_type.params,
-                                            .return_type = fql_type,
+                            } else {
+                                const res = try check.parser.pushToken(allocator, token);
+                                if (res.expr) |expr| {
+                                    try collection.members.append(allocator, .{
+                                        .check_constraint = .{
+                                            .name = check.name.?,
+                                            .predicate = expr,
                                         },
-                                    };
+                                    });
+
+                                    collection.member_state = .empty;
                                 }
 
                                 return .{ .save = res.save };
-                            },
-                            .before_body => |before_body| {
-                                if (before_body.return_type != null and token == .colon) {
-                                    function.* = .{
-                                        .return_type = .{
-                                            .name = before_body.name,
-                                            .params = before_body.params,
-                                        },
-                                    };
-                                } else if (token == .lbrace) {
-                                    function.* = .{
-                                        .body = .{
-                                            .name = before_body.name,
-                                            .params = before_body.params,
-                                            .return_type = before_body.return_type,
-                                        },
-                                    };
+                            }
+                        },
+                        .compute => |*compute| {
+                            if (compute.name == null) {
+                                switch (token) {
+                                    inline .string, .word => |name| {
+                                        compute.name = try allocator.dupe(u8, name);
+                                    },
+                                    else => {
+                                        std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
+                                        return error.UnexpectedToken;
+                                    },
+                                }
+                            } else if (compute.parser == null) {
+                                if (compute.type == null and token == .colon) {
+                                    compute.parser = .{ .type = .{} };
+                                } else if (token == .equal) {
+                                    compute.parser = .{ .expr = .{} };
                                 } else {
-                                    if (before_body.return_type != null) {
-                                        std.log.err("unexpected token: expected colon or lbrace but got {s}", .{@tagName(token)});
+                                    if (compute.type == null) {
+                                        std.log.err("unexpected token: expected colon or equal but got {s}", .{@tagName(token)});
                                     } else {
-                                        std.log.err("unexpected token: expected lbrace but got {s}", .{@tagName(token)});
+                                        std.log.err("unexpected token: expected equal but got {s}", .{@tagName(token)});
                                     }
 
                                     return error.UnexpectedToken;
                                 }
+                            } else {
+                                switch (compute.parser.?) {
+                                    .type => |*parser| {
+                                        const res = try parser.pushToken(allocator, token);
+                                        if (res.type) |fql_type| {
+                                            compute.type = fql_type;
+                                            compute.parser = null;
+                                        }
+
+                                        return .{ .save = res.save };
+                                    },
+                                    .expr => |*parser| {
+                                        const res = try parser.pushToken(allocator, token);
+                                        if (res.expr) |expr| {
+                                            try collection.members.append(allocator, .{
+                                                .computed_field = .{
+                                                    .name = compute.name.?,
+                                                    .type = compute.type,
+                                                    .function = expr,
+                                                },
+                                            });
+
+                                            collection.member_state = .empty;
+                                        }
+
+                                        return .{ .save = res.save };
+                                    },
+                                }
+                            }
+                        },
+                    }
+                },
+                .role => |*role| {
+                    if (role.name == null) {
+                        switch (token) {
+                            inline .string, .word => |name| {
+                                role.name = try allocator.dupe(u8, name);
                             },
-                            .body => |*body| {
-                                if (body.expr_parser.state == .empty and token == .rbrace) {
+                            else => {
+                                std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
+                                return error.UnexpectedToken;
+                            },
+                        }
+                    } else if (role.member_state == null) {
+                        switch (token) {
+                            .lbrace => {
+                                role.member_state = .empty;
+                            },
+                            else => {
+                                std.log.err("unexpected token: expected lbrace but got {s}", .{@tagName(token)});
+                                return error.UnexpectedToken;
+                            },
+                        }
+                    } else switch (role.member_state.?) {
+                        .empty => {
+                            switch (token) {
+                                .eol, .semi => {},
+                                .word => |word| {
+                                    if (std.meta.stringToEnum(enum { membership, privileges }, word)) |keyword| {
+                                        switch (keyword) {
+                                            inline else => |kw| role.member_state = @field(@TypeOf(role.member_state.?), @tagName(kw)),
+                                        }
+                                    } else {
+                                        std.log.err("unexpected token: word to equal \"membership\" or \"privileges\" but got {s}", .{word});
+                                        return error.UnexpectedToken;
+                                    }
+                                },
+                                .rbrace => {
                                     self.state = .{
                                         .end = .{
-                                            .function = .{
-                                                .name = body.name,
-                                                .parameters = body.params,
-                                                .return_type = body.return_type,
-                                                .body = try body.exprs.toOwnedSlice(allocator),
+                                            .role = .{
+                                                .name = role.name.?,
+                                                .members = try role.members.toOwnedSlice(allocator),
                                             },
                                         },
                                     };
-                                } else {
-                                    const res = try body.expr_parser.pushToken(allocator, token);
+                                },
+                                else => {
+                                    std.log.err("unexpected token: expected eol, semi or word but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                },
+                            }
+                        },
+                        .membership => {
+                            switch (token) {
+                                inline .string, .word => |collection| {
+                                    role.member_state = .{ .membership_collection = try allocator.dupe(u8, collection) };
+                                },
+                                else => {
+                                    std.log.err("unexpected token: expected string or word but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                },
+                            }
+                        },
+                        .membership_collection => |collection| {
+                            switch (token) {
+                                .eol, .semi => {
+                                    try role.members.append(allocator, .{ .membership = .{ .collection = collection } });
+                                    role.member_state = .empty;
+                                },
+                                .lbrace => {
+                                    role.member_state = .{ .membership_block = .{ .collection = collection } };
+                                },
+                                else => {
+                                    std.log.err("unexpected token: expected eol, semi or lbrace but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                },
+                            }
+                        },
+                        .membership_block => |*membership_block| {
+                            switch (membership_block.state) {
+                                .start => {
+                                    switch (token) {
+                                        .eol, .semi => {},
+                                        .word => |word| {
+                                            if (std.mem.eql(u8, word, "predicate")) {
+                                                membership_block.state = .{ .predicate = .{} };
+                                            } else {
+                                                std.log.err("unexpected token: expected word to equal \"predicate\" but got {s}", .{word});
+                                                return error.UnexpectedToken;
+                                            }
+                                        },
+                                        else => {
+                                            std.log.err("unexpected token: expected eol, semi or word but got {s}", .{@tagName(token)});
+                                            return error.UnexpectedToken;
+                                        },
+                                    }
+                                },
+                                .predicate => |*expr_parser| {
+                                    const res = try expr_parser.pushToken(allocator, token);
                                     if (res.expr) |expr| {
-                                        try body.exprs.append(allocator, expr);
+                                        membership_block.state = .{ .end = expr };
+                                    }
+                                    return .{ .save = res.save };
+                                },
+                                .end => |predicate| {
+                                    switch (token) {
+                                        .eol, .semi => {},
+                                        .rbrace => {
+                                            try role.members.append(allocator, .{
+                                                .membership = .{
+                                                    .collection = membership_block.collection,
+                                                    .predicate = predicate,
+                                                },
+                                            });
+                                            role.member_state = .empty;
+                                        },
+                                        else => {
+                                            std.log.err("unexpected token: expected rbrace but got {s}", .{@tagName(token)});
+                                            return error.UnexpectedToken;
+                                        },
+                                    }
+                                },
+                            }
+                        },
+                        .privileges => {
+                            switch (token) {
+                                inline .string, .word => |resource| {
+                                    role.member_state = .{ .privileges_resource = try allocator.dupe(u8, resource) };
+                                },
+                                else => {
+                                    std.log.err("unexpected token: expected string or word but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                },
+                            }
+                        },
+                        .privileges_resource => |resource| {
+                            switch (token) {
+                                .lbrace => {
+                                    role.member_state = .{ .privileges_block = .{ .resource = resource } };
+                                },
+                                else => {
+                                    std.log.err("unexpected token: expected lbrace but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                },
+                            }
+                        },
+                        .privileges_block => |*privileges_block| {
+                            switch (privileges_block.state) {
+                                .start => {
+                                    switch (token) {
+                                        .eol, .semi => {},
+                                        .rbrace => {
+                                            try role.members.append(allocator, .{
+                                                .privileges = .{
+                                                    .resource = privileges_block.resource,
+                                                    .actions = try privileges_block.actions.toOwnedSlice(allocator),
+                                                },
+                                            });
+                                            role.member_state = .empty;
+                                        },
+                                        .word => |word| {
+                                            if (std.meta.stringToEnum(SchemaDefinition.Role.Member.Privileges.Action.Action, word)) |action| {
+                                                privileges_block.state = .{ .action = action };
+                                            } else {
+                                                std.log.err("unexpected token: expected word to equal \"predicate\" but got {s}", .{word});
+                                                return error.UnexpectedToken;
+                                            }
+                                        },
+                                        else => {
+                                            std.log.err("unexpected token: expected eol, semi, rbrace or word but got {s}", .{@tagName(token)});
+                                            return error.UnexpectedToken;
+                                        },
+                                    }
+                                },
+                                .action => |action| {
+                                    switch (token) {
+                                        .eol, .semi => {
+                                            try privileges_block.actions.append(allocator, .{ .action = action });
+                                            privileges_block.state = .start;
+                                        },
+                                        .lbrace => {
+                                            privileges_block.state = .{ .action_block = action };
+                                        },
+                                        else => {
+                                            std.log.err("unexpected token: expected eol, semi or lbrace but got {s}", .{@tagName(token)});
+                                            return error.UnexpectedToken;
+                                        },
+                                    }
+                                },
+                                .action_block => |action| {
+                                    switch (token) {
+                                        .eol, .semi => {},
+                                        .word => |word| {
+                                            if (std.mem.eql(u8, word, "predicate")) {
+                                                privileges_block.state = .{ .action_predicate = .{ .action = action } };
+                                            } else {
+                                                std.log.err("unexpected token: expected word to equal \"predicate\" but got {s}", .{word});
+                                                return error.UnexpectedToken;
+                                            }
+                                        },
+                                        else => {
+                                            std.log.err("unexpected token: expected eol, semi or word but got {s}", .{@tagName(token)});
+                                            return error.UnexpectedToken;
+                                        },
+                                    }
+                                },
+                                .action_predicate => |*action_predicate| {
+                                    const res = try action_predicate.expr_parser.pushToken(allocator, token);
+                                    if (res.expr) |expr| {
+                                        privileges_block.state = .{
+                                            .action_end = .{
+                                                .action = action_predicate.action,
+                                                .predicate = expr,
+                                            },
+                                        };
                                     }
 
                                     return .{ .save = res.save };
-                                }
-                            },
-                        }
-                    },
-                    .end => |*definition| {
-                        defer {
-                            self.annotations.clearRetainingCapacity();
-                            self.state = .empty;
-                        }
-
-                        switch (definition.*) {
-                            inline else => |*def, def_tag| {
-                                const E = AnnotationEnum(def_tag);
-
-                                for (self.annotations.items) |annotation| {
-                                    defer allocator.free(annotation.name);
-
-                                    if (std.meta.fields(E).len > 0) {
-                                        if (std.meta.stringToEnum(E, annotation.name)) |name| {
-                                            switch (name) {
-                                                inline else => |tag| {
-                                                    @field(def, @tagName(tag)) = annotation.value;
-                                                },
-                                            }
-                                            continue;
-                                        }
+                                },
+                                .action_end => |action| {
+                                    switch (token) {
+                                        .eol, .semi => {},
+                                        .rbrace => {
+                                            try privileges_block.actions.append(allocator, action);
+                                            privileges_block.state = .start;
+                                        },
+                                        else => {
+                                            std.log.err("unexpected token: expected eol, semi or rbrace but got {s}", .{@tagName(token)});
+                                            return error.UnexpectedToken;
+                                        },
+                                    }
+                                },
+                            }
+                        },
+                    }
+                },
+                .function => |*function| {
+                    switch (function.*) {
+                        .start => {
+                            switch (token) {
+                                inline .string, .word => |s| {
+                                    function.* = .{ .after_name = try allocator.dupe(u8, s) };
+                                },
+                                else => {
+                                    std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                },
+                            }
+                        },
+                        .after_name => |name| {
+                            switch (token) {
+                                .lparen => {
+                                    function.* = .{ .params = .{ .name = name } };
+                                },
+                                else => {
+                                    std.log.err("unexpected token: expected lparen but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                },
+                            }
+                        },
+                        .params => |*params| {
+                            switch (params.param_state) {
+                                .start => {
+                                    switch (token) {
+                                        .word => |word| {
+                                            params.param_state = .{ .after_name = try allocator.dupe(u8, word) };
+                                        },
+                                        else => {
+                                            std.log.err("unexpected token: expected word but got {s}", .{@tagName(token)});
+                                            return error.UnexpectedToken;
+                                        },
+                                    }
+                                },
+                                .after_name => |name| {
+                                    switch (token) {
+                                        .colon => {
+                                            params.param_state = .{ .before_type = .{ .name = name } };
+                                        },
+                                        .rparen, .comma => {
+                                            try params.params.append(allocator, .{ .name = name });
+                                            params.param_state = .end;
+                                            return .{ .save = token };
+                                        },
+                                        else => {
+                                            std.log.err("unexpected token: expected colon, rparen or comma but got {s}", .{@tagName(token)});
+                                            return error.UnexpectedToken;
+                                        },
+                                    }
+                                },
+                                .before_type => |*before_type| {
+                                    const res = try before_type.type_parser.pushToken(allocator, token);
+                                    if (res.type) |fql_type| {
+                                        try params.params.append(allocator, .{
+                                            .name = before_type.name,
+                                            .type = fql_type,
+                                        });
+                                        params.param_state = .end;
                                     }
 
-                                    annotation.value.deinit(allocator);
-                                    std.log.warn("unknown {s} annotation: @{s}", .{ @tagName(def_tag), annotation.name });
+                                    return .{ .save = res.save };
+                                },
+                                .end => {
+                                    switch (token) {
+                                        .comma => {
+                                            params.param_state = .start;
+                                        },
+                                        .rparen => {
+                                            function.* = .{
+                                                .before_body = .{
+                                                    .name = params.name,
+                                                    .params = try params.params.toOwnedSlice(allocator),
+                                                },
+                                            };
+                                        },
+                                        else => {
+                                            std.log.err("unexpected token: expected rparen or comma but got {s}", .{@tagName(token)});
+                                            return error.UnexpectedToken;
+                                        },
+                                    }
+                                },
+                            }
+                        },
+                        .return_type => |*return_type| {
+                            const res = try return_type.type_parser.pushToken(allocator, token);
+                            if (res.type) |fql_type| {
+                                function.* = .{
+                                    .before_body = .{
+                                        .name = return_type.name,
+                                        .params = return_type.params,
+                                        .return_type = fql_type,
+                                    },
+                                };
+                            }
+
+                            return .{ .save = res.save };
+                        },
+                        .before_body => |before_body| {
+                            if (before_body.return_type != null and token == .colon) {
+                                function.* = .{
+                                    .return_type = .{
+                                        .name = before_body.name,
+                                        .params = before_body.params,
+                                    },
+                                };
+                            } else if (token == .lbrace) {
+                                function.* = .{
+                                    .body = .{
+                                        .name = before_body.name,
+                                        .params = before_body.params,
+                                        .return_type = before_body.return_type,
+                                    },
+                                };
+                            } else {
+                                if (before_body.return_type != null) {
+                                    std.log.err("unexpected token: expected colon or lbrace but got {s}", .{@tagName(token)});
+                                } else {
+                                    std.log.err("unexpected token: expected lbrace but got {s}", .{@tagName(token)});
                                 }
-                            },
-                        }
 
-                        defer self.state = .empty;
+                                return error.UnexpectedToken;
+                            }
+                        },
+                        .body => |*body| {
+                            if (body.expr_parser.state == .empty and token == .rbrace) {
+                                self.state = .{
+                                    .end = .{
+                                        .function = .{
+                                            .name = body.name,
+                                            .parameters = body.params,
+                                            .return_type = body.return_type,
+                                            .body = try body.exprs.toOwnedSlice(allocator),
+                                        },
+                                    },
+                                };
+                            } else {
+                                const res = try body.expr_parser.pushToken(allocator, token);
+                                if (res.expr) |expr| {
+                                    try body.exprs.append(allocator, expr);
+                                }
 
-                        return .{ .save = token, .definition = definition.* };
-                    },
-                }
+                                return .{ .save = res.save };
+                            }
+                        },
+                    }
+                },
+                .end => |*definition| {
+                    defer {
+                        self.annotations.clearRetainingCapacity();
+                        self.state = .empty;
+                    }
 
-                return .{};
+                    switch (definition.*) {
+                        inline else => |*def, def_tag| {
+                            const E = AnnotationEnum(def_tag);
+
+                            for (self.annotations.items) |annotation| {
+                                defer allocator.free(annotation.name);
+
+                                if (std.meta.fields(E).len > 0) {
+                                    if (std.meta.stringToEnum(E, annotation.name)) |name| {
+                                        switch (name) {
+                                            inline else => |tag| {
+                                                @field(def, @tagName(tag)) = annotation.value;
+                                            },
+                                        }
+                                        continue;
+                                    }
+                                }
+
+                                annotation.value.deinit(allocator);
+                                std.log.warn("unknown {s} annotation: @{s}", .{ @tagName(def_tag), annotation.name });
+                            }
+                        },
+                    }
+
+                    defer self.state = .empty;
+
+                    return .{ .save = token, .definition = definition.* };
+                },
             }
-        };
 
-        allocator: std.mem.Allocator,
-        inner: Unmanaged = .{},
-
-        pub fn init(allocator: std.mem.Allocator) Parser {
-            return .{ .allocator = allocator };
+            return .{};
         }
+    });
 
-        pub fn deinit(self: Parser) void {
-            self.inner.deinit(self.allocator);
-        }
-
-        pub fn reset(self: *Parser) void {
-            self.deinit();
-            self.inner = .{};
-        }
-
-        pub const PushResult = struct {
-            save: ?Tokenizer.Token = null,
-            definition: ?SchemaDefinition = null,
-        };
-
-        pub fn pushToken(self: *Parser, token: Tokenizer.Token) !PushResult {
-            return try self.inner.pushToken(self.allocator, token);
-        }
-    };
-
-    pub fn parse(allocator: std.mem.Allocator, it: *Tokenizer.TokenIterator) !SchemaDefinition {
-        var parser = Parser.init(allocator);
-        defer parser.deinit();
-
-        while (true) {
-            const token = try it.nextToken(allocator);
-            defer token.deinit(allocator);
-
-            const result = try parser.pushToken(token);
-            if (result.save) |save| {
-                // std.debug.print("saving token: {any}\n", .{token});
-                it.saveToken(try save.dupe(allocator));
-            }
-
-            if (result.definition) |definition| {
-                return definition;
-            }
-        }
-    }
+    pub const parse = Parser.parseIterator;
 };
 
-pub fn parseDefinition(allocator: std.mem.Allocator, reader: std.io.AnyReader) !SchemaDefinition {
-    var it = Tokenizer.TokenIterator.init(reader);
-    defer it.deinit(allocator);
-
-    return SchemaDefinition.parse(allocator, &it);
-}
+pub const parseDefinition = SchemaDefinition.Parser.parseReader;
 
 fn expectParsedDefnEqual(str: []const u8, expected: SchemaDefinition) !void {
+    try parsing.checkForLeaks(SchemaDefinition.Parser, str);
+
     var stream = std.io.fixedBufferStream(str);
     var actual = try parseDefinition(testing.allocator, stream.reader().any());
     defer actual.deinit(testing.allocator);

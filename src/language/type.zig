@@ -3,6 +3,7 @@ const testing = std.testing;
 
 const Tokenizer = @import("../Tokenizer.zig");
 const util = @import("../util.zig");
+const parsing = @import("../parsing.zig");
 
 pub const FQLType = union(enum) {
     pub const Object = struct {
@@ -270,463 +271,124 @@ pub const FQLType = union(enum) {
         return try str.toOwnedSlice();
     }
 
-    pub const Parser = struct {
-        pub const Unmanaged = struct {
-            const State = union(enum) {
-                const Tuple = struct {
-                    types: std.ArrayListUnmanaged(FQLType) = .{},
-                    parens: bool = false,
-
-                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                        self.types.deinit(allocator);
-                    }
-                };
-
-                const Object = struct {
-                    fields: std.ArrayListUnmanaged(FQLType.Object.Field) = .{},
-                    state: union(enum) {
-                        before_key,
-                        after_key: FQLType.Object.Field.Key,
-                        after_type: FQLType.Object.Field,
-
-                        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                            switch (self) {
-                                .before_key => {},
-                                inline else => |s| s.deinit(allocator),
-                            }
-                        }
-                    } = .before_key,
-
-                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                        for (self.fields.items) |field| {
-                            field.deinit(allocator);
-                        }
-
-                        self.fields.deinit(allocator);
-                        self.state.deinit(allocator);
-                    }
-                };
-
-                const Template = struct {
-                    name: []const u8,
-                    parameters: std.ArrayListUnmanaged(FQLType) = .{},
-
-                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                        for (self.parameters.items) |parameter| {
-                            parameter.deinit(allocator);
-                        }
-
-                        self.parameters.deinit(allocator);
-                        allocator.free(self.name);
-                    }
-                };
-
-                const LongFunction = struct {
-                    parameters: []const FQLType,
-                    variadic_state: ?union(enum) {
-                        start,
-                        after_type: FQLType,
-                        after_rparen: FQLType,
-                    } = null,
-
-                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                        switch (self.variadic_state) {
-                            .start => {},
-                            inline .after_type, .after_rparen => |t| t.deinit(allocator),
-                        }
-
-                        for (self.parameters.items) |parameter| {
-                            parameter.deinit(allocator);
-                        }
-
-                        self.parameters.deinit(allocator);
-                    }
-                };
-
-                start,
-                identifier: []const u8,
-                union_lhs: FQLType,
-                tuple: State.Tuple,
-                object: State.Object,
-                template: State.Template,
-                short_function: FQLType,
-                long_function: LongFunction,
-                end: FQLType,
+    pub const Parser = parsing.ManagedParser(struct {
+        const State = union(enum) {
+            const Tuple = struct {
+                types: std.ArrayListUnmanaged(FQLType) = .{},
+                parens: bool = false,
 
                 fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                    switch (self) {
-                        .identifier => |s| allocator.free(s),
-                        inline .tuple, .object, .template, .union_lhs, .short_function, .long_function, .end => self.deinit(allocator),
-                        .start => {},
+                    for (self.types.items) |fql_type| {
+                        fql_type.deinit(allocator);
                     }
+
+                    var types_mutable_copy = self.types;
+                    types_mutable_copy.deinit(allocator);
                 }
             };
 
-            parent: ?*Unmanaged = null,
-            state: State = .start,
+            const Object = struct {
+                fields: std.ArrayListUnmanaged(FQLType.Object.Field) = .{},
+                state: union(enum) {
+                    before_key,
+                    after_key: FQLType.Object.Field.Key,
+                    after_type: FQLType.Object.Field,
 
-            pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                if (self.parent) |parent| {
-                    parent.deinit(allocator);
-                    allocator.destroy(parent);
+                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                        switch (self) {
+                            .before_key => {},
+                            inline else => |s| s.deinit(allocator),
+                        }
+                    }
+                } = .before_key,
+
+                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                    for (self.fields.items) |field| {
+                        field.deinit(allocator);
+                    }
+
+                    var fields_mutable_copy = self.fields;
+                    fields_mutable_copy.deinit(allocator);
+                    self.state.deinit(allocator);
                 }
+            };
 
-                self.state.deinit(allocator);
-            }
+            const Template = struct {
+                name: []const u8,
+                parameters: std.ArrayListUnmanaged(FQLType) = .{},
 
-            inline fn finalizeType(self: *@This(), fql_type: FQLType) void {
-                self.state = .{ .end = fql_type };
-            }
+                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                    for (self.parameters.items) |parameter| {
+                        parameter.deinit(allocator);
+                    }
 
-            fn startChildState(self: *@This(), allocator: std.mem.Allocator) !void {
-                self.* = .{ .parent = try util.mem.createCopy(@This(), allocator, self) };
-            }
-
-            pub fn pushToken(self: *@This(), allocator: std.mem.Allocator, token: Tokenizer.Token) !PushResult {
-                // std.debug.print("type parser state: {s}\n", .{@tagName(self.state)});
-                if (token == .comment_block or token == .comment_line or (token == .eol and self.state != .end and self.state != .identifier)) {
-                    return .{};
+                    var parameters_mutable_copy = self.parameters;
+                    parameters_mutable_copy.deinit(allocator);
+                    allocator.free(self.name);
                 }
+            };
 
-                switch (self.state) {
-                    .start => switch (token) {
-                        .string => |str| {
-                            self.state = .{
-                                .end = .{
-                                    .string_literal = try allocator.dupe(u8, str),
-                                },
-                            };
-                        },
-                        .number => |num| {
-                            self.state = .{
-                                .end = .{
-                                    .number_literal = try allocator.dupe(u8, num),
-                                },
-                            };
-                        },
-                        .word => |word| {
-                            self.state = .{
-                                .identifier = try allocator.dupe(u8, word),
-                            };
-                        },
-                        .lbrace => {
-                            self.state = .{ .object = .{} };
-                        },
-                        .lbracket => {
-                            self.state = .{ .tuple = .{} };
-                            try self.startChildState(allocator);
-                        },
-                        .lparen => {
-                            self.state = .{ .tuple = .{ .parens = true } };
-                            try self.startChildState(allocator);
-                        },
-                        else => {
-                            if (self.parent) |parent| {
-                                if (token == .dot3 and parent.state == .tuple and parent.state.tuple.parens) {
-                                    parent.state = .{
-                                        .long_function = .{
-                                            .parameters = try parent.state.tuple.types.toOwnedSlice(allocator),
-                                            .variadic_state = .start,
-                                        },
-                                    };
+            const LongFunction = struct {
+                parameters: []const FQLType,
+                variadic_state: ?union(enum) {
+                    start,
+                    after_type: FQLType,
+                    after_rparen: FQLType,
+                } = null,
 
-                                    return .{};
-                                }
-                            }
-
-                            std.log.err("unexpected token: expected string, number, word, lbrace, lbracket or lparens but got {s}", .{@tagName(token)});
-                            return error.UnexpectedToken;
-                        },
-                    },
-                    .identifier => |identifier| switch (token) {
-                        .larrow => {
-                            self.state = .{ .template = .{ .name = identifier } };
-                            try self.startChildState(allocator);
-                        },
-                        else => {
-                            self.state = .{ .end = .{ .named = identifier } };
-                            return .{ .save = token };
-                        },
-                    },
-                    .tuple => |*tuple| switch (token) {
-                        .comma => {
-                            try self.startChildState(allocator);
-                        },
-                        else => {
-                            if ((tuple.parens and token == .rparen) or (!tuple.parens and token == .rbracket)) {
-                                if (tuple.types.items.len == 1) {
-                                    self.finalizeType(.{
-                                        .isolated = blk: {
-                                            defer tuple.types.deinit(allocator);
-
-                                            break :blk try util.mem.createCopy(FQLType, allocator, &tuple.types.items[0]);
-                                        },
-                                    });
-                                } else {
-                                    self.finalizeType(.{
-                                        .tuple = .{
-                                            .types = try tuple.types.toOwnedSlice(allocator),
-                                            .parens = tuple.parens,
-                                        },
-                                    });
-                                }
-
-                                return .{};
-                            }
-
-                            std.log.err("unexpected token: expected comma or {s} but got {s}", .{ if (tuple.parens) "rparen" else "rbracket", @tagName(token) });
-                            return error.UnexpectedToken;
-                        },
-                    },
-                    .object => |*object_state| switch (object_state.state) {
-                        .before_key => {
-                            object_state.state = .{
-                                .after_key = switch (token) {
-                                    .word => |word| .{
-                                        .identifier = try allocator.dupe(u8, word),
-                                    },
-                                    .string => |str| .{
-                                        .string = try allocator.dupe(u8, str),
-                                    },
-                                    .asterisk => .wildcard,
-                                    else => {
-                                        std.log.err("unexpected token: expected word, string or asterisk but got {s}", .{@tagName(token)});
-                                        return error.UnexpectedToken;
-                                    },
-                                },
-                            };
-                        },
-                        .after_key => switch (token) {
-                            .colon => {
-                                try self.startChildState(allocator);
-                            },
-                            else => {
-                                std.log.err("unexpected token: expected colon but got {s}", .{@tagName(token)});
-                                return error.UnexpectedToken;
-                            },
-                        },
-                        .after_type => |field| switch (token) {
-                            .comma => {
-                                try object_state.fields.append(allocator, field);
-                                object_state.state = .before_key;
-                            },
-                            .rbrace => {
-                                var fields = object_state.fields;
-                                defer fields.deinit(allocator);
-
-                                try fields.append(allocator, field);
-
-                                self.state = .{
-                                    .end = .{
-                                        .object = .{
-                                            .fields = try fields.toOwnedSlice(allocator),
-                                        },
-                                    },
-                                };
-                            },
-                            else => {
-                                std.log.err("unexpected token: expected comma or rbrace but got {s}", .{@tagName(token)});
-                                return error.UnexpectedToken;
-                            },
-                        },
-                    },
-                    .template => |template| switch (token) {
-                        .comma => {
-                            try self.startChildState(allocator);
-                        },
-                        .rarrow => {
-                            var parameters = template.parameters;
-                            defer parameters.deinit(allocator);
-
-                            self.state = .{
-                                .end = .{
-                                    .template = .{
-                                        .name = template.name,
-                                        .parameters = try parameters.toOwnedSlice(allocator),
-                                    },
-                                },
-                            };
-                        },
-                        else => {
-                            std.log.err("unexpected token: expected comma or rarrow but got {s}", .{@tagName(token)});
-                            return error.UnexpectedToken;
-                        },
-                    },
-                    .long_function => |*long_function| {
-                        if (long_function.variadic_state) |variadic_state| {
-                            switch (variadic_state) {
-                                .after_type => |fql_type| {
-                                    switch (token) {
-                                        .rparen => {
-                                            long_function.variadic_state = .{ .after_rparen = fql_type };
-                                        },
-                                        else => {
-                                            std.log.err("unexpected token: expected rparen but got {s}", .{@tagName(token)});
-                                            return error.UnexpectedToken;
-                                        },
-                                    }
-                                },
-                                .after_rparen => {
-                                    switch (token) {
-                                        .equal_rarrow => {
-                                            try self.startChildState(allocator);
-                                        },
-                                        else => {
-                                            std.log.err("unexpected token: expected equal_rarrow but got {s}", .{@tagName(token)});
-                                            return error.UnexpectedToken;
-                                        },
-                                    }
-                                },
-                                else => {
-                                    std.debug.panic("invalid parser state: long function: variadic_state is {s}", .{@tagName(variadic_state)});
-                                },
-                            }
-                        } else {
-                            std.debug.panic("invalid parser state: long function: variadic_state is null", .{});
+                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                    if (self.variadic_state) |variadic_state| {
+                        switch (variadic_state) {
+                            .start => {},
+                            inline .after_type, .after_rparen => |t| t.deinit(allocator),
                         }
-                    },
-                    .end => |fql_type| {
-                        switch (token) {
-                            .question => {
-                                self.finalizeType(.{ .optional = try util.mem.createCopy(FQLType, allocator, &fql_type) });
-                                return .{};
-                            },
-                            .pipe => {
-                                self.state = .{ .union_lhs = fql_type };
-                                try self.startChildState(allocator);
-                                return .{};
-                            },
-                            .equal_rarrow => {
-                                self.state = .{ .short_function = fql_type };
-                                try self.startChildState(allocator);
-                                return .{};
-                            },
-                            else => {},
-                        }
+                    }
 
-                        if (token == .equal_rarrow) {
-                            if (fql_type == .tuple) {
-                                self.state = .{
-                                    .long_function = .{
-                                        .parameters = fql_type.tuple.types.?,
-                                    },
-                                };
+                    for (self.parameters) |parameter| {
+                        parameter.deinit(allocator);
+                    }
 
-                                try self.startChildState(allocator);
-                                return .{};
-                            }
-                        }
-
-                        if (self.parent) |parent| {
-                            defer allocator.destroy(parent);
-                            defer self.* = parent.*;
-
-                            switch (parent.state) {
-                                .tuple => |*tuple| {
-                                    try tuple.types.append(allocator, fql_type);
-                                },
-                                .object => |*object_state| {
-                                    std.debug.assert(object_state.state == .after_key);
-
-                                    object_state.state = .{
-                                        .after_type = .{
-                                            .key = object_state.state.after_key,
-                                            .type = fql_type,
-                                        },
-                                    };
-                                },
-                                .template => |*template_state| {
-                                    try template_state.parameters.append(allocator, fql_type);
-                                },
-                                .union_lhs => |lhs| {
-                                    parent.finalizeType(.{
-                                        .@"union" = .{
-                                            .lhs = try util.mem.createCopy(FQLType, allocator, &lhs),
-                                            .rhs = try util.mem.createCopy(FQLType, allocator, &fql_type),
-                                        },
-                                    });
-                                },
-                                .short_function => |param_type| {
-                                    parent.finalizeType(.{
-                                        .function = .{
-                                            .parameters = .{ .short = try util.mem.createCopy(FQLType, allocator, &param_type) },
-                                            .return_type = try util.mem.createCopy(FQLType, allocator, &fql_type),
-                                        },
-                                    });
-                                },
-                                .long_function => |*long_function| {
-                                    if (long_function.variadic_state) |variadic_state| {
-                                        switch (variadic_state) {
-                                            .start => {
-                                                long_function.variadic_state = .{ .after_type = fql_type };
-                                            },
-                                            .after_rparen => |after_rparen| {
-                                                parent.finalizeType(.{
-                                                    .function = .{
-                                                        .parameters = .{
-                                                            .long = .{
-                                                                .types = blk: {
-                                                                    const types = try allocator.realloc(@constCast(long_function.parameters), long_function.parameters.len + 1);
-                                                                    types[types.len - 1] = after_rparen;
-                                                                    break :blk types;
-                                                                },
-                                                                .variadic = true,
-                                                            },
-                                                        },
-                                                        .return_type = try util.mem.createCopy(FQLType, allocator, &fql_type),
-                                                    },
-                                                });
-                                            },
-                                            else => {
-                                                std.debug.panic("invalid parser parent state: long function: {s}", .{@tagName(variadic_state)});
-                                            },
-                                        }
-                                    } else {
-                                        parent.finalizeType(.{
-                                            .function = .{
-                                                .parameters = .{
-                                                    .long = .{
-                                                        .types = long_function.parameters,
-                                                    },
-                                                },
-                                                .return_type = try util.mem.createCopy(FQLType, allocator, &fql_type),
-                                            },
-                                        });
-                                    }
-                                },
-                                else => std.debug.panic("invalid parser parent state: {s}", .{@tagName(parent.state)}),
-                            }
-
-                            return .{ .save = token };
-                        }
-
-                        defer self.* = .{};
-
-                        return .{ .save = token, .type = fql_type };
-                    },
-                    else => {
-                        std.debug.panic("invalid parser state: {s}", .{@tagName(self.state)});
-                    },
+                    allocator.free(self.parameters);
                 }
+            };
 
-                return .{};
+            start,
+            identifier: []const u8,
+            union_lhs: FQLType,
+            tuple: State.Tuple,
+            object: State.Object,
+            template: State.Template,
+            short_function: FQLType,
+            long_function: LongFunction,
+            end: FQLType,
+
+            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                switch (self) {
+                    .identifier => |s| allocator.free(s),
+                    inline .tuple, .object, .template, .union_lhs, .short_function, .long_function, .end => |state| state.deinit(allocator),
+                    .start => {},
+                }
             }
         };
 
-        allocator: std.mem.Allocator,
-        inner: Unmanaged = .{},
+        parent: ?*@This() = null,
+        state: State = .start,
 
-        pub fn init(allocator: std.mem.Allocator) Parser {
-            return .{ .allocator = allocator };
+        pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+            if (self.parent) |parent| {
+                parent.deinit(allocator);
+                allocator.destroy(parent);
+            }
+
+            self.state.deinit(allocator);
         }
 
-        pub fn deinit(self: Parser) void {
-            self.inner.deinit(self.allocator);
+        inline fn finalizeType(self: *@This(), fql_type: FQLType) void {
+            self.state = .{ .end = fql_type };
         }
 
-        pub fn reset(self: *Parser) void {
-            self.deinit();
-            self.inner = .{};
+        fn startChildState(self: *@This(), allocator: std.mem.Allocator) !void {
+            self.* = .{ .parent = try util.mem.createCopy(@This(), allocator, self) };
         }
 
         pub const PushResult = struct {
@@ -734,42 +396,344 @@ pub const FQLType = union(enum) {
             type: ?FQLType = null,
         };
 
-        pub fn pushToken(self: *Parser, token: Tokenizer.Token) !PushResult {
-            return try self.inner.pushToken(self.allocator, token);
-        }
-    };
-
-    pub fn parse(allocator: std.mem.Allocator, it: *Tokenizer.TokenIterator) !FQLType {
-        var parser = Parser.init(allocator);
-        defer parser.deinit();
-
-        while (true) {
-            const token = try it.nextToken(allocator);
-            defer token.deinit(allocator);
-
-            // std.debug.print("pushing token: {any}\n", .{token});
-            const result = try parser.pushToken(token);
-            // std.debug.print("parser state: {s} {s}\n", .{ @tagName(parser.inner.state), if (parser.inner.parent) |p| @tagName(p.state) else "" });
-            if (result.save) |save| {
-                // std.debug.print("saving token: {any}\n", .{token});
-                it.saveToken(try save.dupe(allocator));
+        pub fn pushToken(self: *@This(), allocator: std.mem.Allocator, token: Tokenizer.Token) !PushResult {
+            if (token == .comment_block or token == .comment_line or (token == .eol and self.state != .end and self.state != .identifier)) {
+                return .{};
             }
 
-            if (result.type) |fql_type| {
-                return fql_type;
+            switch (self.state) {
+                .start => switch (token) {
+                    .string => |str| {
+                        self.state = .{
+                            .end = .{
+                                .string_literal = try allocator.dupe(u8, str),
+                            },
+                        };
+                    },
+                    .number => |num| {
+                        self.state = .{
+                            .end = .{
+                                .number_literal = try allocator.dupe(u8, num),
+                            },
+                        };
+                    },
+                    .word => |word| {
+                        self.state = .{
+                            .identifier = try allocator.dupe(u8, word),
+                        };
+                    },
+                    .lbrace => {
+                        self.state = .{ .object = .{} };
+                    },
+                    .lbracket => {
+                        self.state = .{ .tuple = .{} };
+                        try self.startChildState(allocator);
+                    },
+                    .lparen => {
+                        self.state = .{ .tuple = .{ .parens = true } };
+                        try self.startChildState(allocator);
+                    },
+                    else => {
+                        if (self.parent) |parent| {
+                            if (token == .dot3 and parent.state == .tuple and parent.state.tuple.parens) {
+                                parent.state = .{
+                                    .long_function = .{
+                                        .parameters = try parent.state.tuple.types.toOwnedSlice(allocator),
+                                        .variadic_state = .start,
+                                    },
+                                };
+
+                                return .{};
+                            }
+                        }
+
+                        std.log.err("unexpected token: expected string, number, word, lbrace, lbracket or lparens but got {s}", .{@tagName(token)});
+                        return error.UnexpectedToken;
+                    },
+                },
+                .identifier => |identifier| switch (token) {
+                    .larrow => {
+                        self.state = .{ .template = .{ .name = identifier } };
+                        try self.startChildState(allocator);
+                    },
+                    else => {
+                        self.state = .{ .end = .{ .named = identifier } };
+                        return .{ .save = token };
+                    },
+                },
+                .tuple => |*tuple| switch (token) {
+                    .comma => {
+                        try self.startChildState(allocator);
+                    },
+                    else => {
+                        if ((tuple.parens and token == .rparen) or (!tuple.parens and token == .rbracket)) {
+                            if (tuple.types.items.len == 1) {
+                                self.finalizeType(.{
+                                    .isolated = blk: {
+                                        defer tuple.types.deinit(allocator);
+
+                                        break :blk try util.mem.createCopy(FQLType, allocator, &tuple.types.items[0]);
+                                    },
+                                });
+                            } else {
+                                self.finalizeType(.{
+                                    .tuple = .{
+                                        .types = try tuple.types.toOwnedSlice(allocator),
+                                        .parens = tuple.parens,
+                                    },
+                                });
+                            }
+
+                            return .{};
+                        }
+
+                        std.log.err("unexpected token: expected comma or {s} but got {s}", .{ if (tuple.parens) "rparen" else "rbracket", @tagName(token) });
+                        return error.UnexpectedToken;
+                    },
+                },
+                .object => |*object_state| switch (object_state.state) {
+                    .before_key => {
+                        object_state.state = .{
+                            .after_key = switch (token) {
+                                .word => |word| .{
+                                    .identifier = try allocator.dupe(u8, word),
+                                },
+                                .string => |str| .{
+                                    .string = try allocator.dupe(u8, str),
+                                },
+                                .asterisk => .wildcard,
+                                else => {
+                                    std.log.err("unexpected token: expected word, string or asterisk but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                },
+                            },
+                        };
+                    },
+                    .after_key => switch (token) {
+                        .colon => {
+                            try self.startChildState(allocator);
+                        },
+                        else => {
+                            std.log.err("unexpected token: expected colon but got {s}", .{@tagName(token)});
+                            return error.UnexpectedToken;
+                        },
+                    },
+                    .after_type => |field| switch (token) {
+                        .comma => {
+                            try object_state.fields.append(allocator, field);
+                            object_state.state = .before_key;
+                        },
+                        .rbrace => {
+                            var fields = object_state.fields;
+                            defer fields.deinit(allocator);
+
+                            try fields.append(allocator, field);
+
+                            self.state = .{
+                                .end = .{
+                                    .object = .{
+                                        .fields = try fields.toOwnedSlice(allocator),
+                                    },
+                                },
+                            };
+                        },
+                        else => {
+                            std.log.err("unexpected token: expected comma or rbrace but got {s}", .{@tagName(token)});
+                            return error.UnexpectedToken;
+                        },
+                    },
+                },
+                .template => |template| switch (token) {
+                    .comma => {
+                        try self.startChildState(allocator);
+                    },
+                    .rarrow => {
+                        var parameters = template.parameters;
+                        defer parameters.deinit(allocator);
+
+                        self.state = .{
+                            .end = .{
+                                .template = .{
+                                    .name = template.name,
+                                    .parameters = try parameters.toOwnedSlice(allocator),
+                                },
+                            },
+                        };
+                    },
+                    else => {
+                        std.log.err("unexpected token: expected comma or rarrow but got {s}", .{@tagName(token)});
+                        return error.UnexpectedToken;
+                    },
+                },
+                .long_function => |*long_function| {
+                    if (long_function.variadic_state) |variadic_state| {
+                        switch (variadic_state) {
+                            .after_type => |fql_type| {
+                                switch (token) {
+                                    .rparen => {
+                                        long_function.variadic_state = .{ .after_rparen = fql_type };
+                                    },
+                                    else => {
+                                        std.log.err("unexpected token: expected rparen but got {s}", .{@tagName(token)});
+                                        return error.UnexpectedToken;
+                                    },
+                                }
+                            },
+                            .after_rparen => {
+                                switch (token) {
+                                    .equal_rarrow => {
+                                        try self.startChildState(allocator);
+                                    },
+                                    else => {
+                                        std.log.err("unexpected token: expected equal_rarrow but got {s}", .{@tagName(token)});
+                                        return error.UnexpectedToken;
+                                    },
+                                }
+                            },
+                            else => {
+                                std.debug.panic("invalid parser state: long function: variadic_state is {s}", .{@tagName(variadic_state)});
+                            },
+                        }
+                    } else {
+                        std.debug.panic("invalid parser state: long function: variadic_state is null", .{});
+                    }
+                },
+                .end => |fql_type| {
+                    switch (token) {
+                        .question => {
+                            self.finalizeType(.{ .optional = try util.mem.createCopy(FQLType, allocator, &fql_type) });
+                            return .{};
+                        },
+                        .pipe => {
+                            self.state = .{ .union_lhs = fql_type };
+                            try self.startChildState(allocator);
+                            return .{};
+                        },
+                        .equal_rarrow => {
+                            self.state = .{ .short_function = fql_type };
+                            try self.startChildState(allocator);
+                            return .{};
+                        },
+                        else => {},
+                    }
+
+                    if (token == .equal_rarrow) {
+                        if (fql_type == .tuple) {
+                            self.state = .{
+                                .long_function = .{
+                                    .parameters = fql_type.tuple.types.?,
+                                },
+                            };
+
+                            try self.startChildState(allocator);
+                            return .{};
+                        }
+                    }
+
+                    if (self.parent) |parent| {
+                        defer allocator.destroy(parent);
+                        defer self.* = parent.*;
+
+                        switch (parent.state) {
+                            .tuple => |*tuple| {
+                                try tuple.types.append(allocator, fql_type);
+                            },
+                            .object => |*object_state| {
+                                std.debug.assert(object_state.state == .after_key);
+
+                                object_state.state = .{
+                                    .after_type = .{
+                                        .key = object_state.state.after_key,
+                                        .type = fql_type,
+                                    },
+                                };
+                            },
+                            .template => |*template_state| {
+                                try template_state.parameters.append(allocator, fql_type);
+                            },
+                            .union_lhs => |lhs| {
+                                parent.finalizeType(.{
+                                    .@"union" = .{
+                                        .lhs = try util.mem.createCopy(FQLType, allocator, &lhs),
+                                        .rhs = try util.mem.createCopy(FQLType, allocator, &fql_type),
+                                    },
+                                });
+                            },
+                            .short_function => |param_type| {
+                                parent.finalizeType(.{
+                                    .function = .{
+                                        .parameters = .{ .short = try util.mem.createCopy(FQLType, allocator, &param_type) },
+                                        .return_type = try util.mem.createCopy(FQLType, allocator, &fql_type),
+                                    },
+                                });
+                            },
+                            .long_function => |*long_function| {
+                                if (long_function.variadic_state) |variadic_state| {
+                                    switch (variadic_state) {
+                                        .start => {
+                                            long_function.variadic_state = .{ .after_type = fql_type };
+                                        },
+                                        .after_rparen => |after_rparen| {
+                                            parent.finalizeType(.{
+                                                .function = .{
+                                                    .parameters = .{
+                                                        .long = .{
+                                                            .types = blk: {
+                                                                const types = try allocator.realloc(@constCast(long_function.parameters), long_function.parameters.len + 1);
+                                                                types[types.len - 1] = after_rparen;
+                                                                break :blk types;
+                                                            },
+                                                            .variadic = true,
+                                                        },
+                                                    },
+                                                    .return_type = try util.mem.createCopy(FQLType, allocator, &fql_type),
+                                                },
+                                            });
+                                        },
+                                        else => {
+                                            std.debug.panic("invalid parser parent state: long function: {s}", .{@tagName(variadic_state)});
+                                        },
+                                    }
+                                } else {
+                                    parent.finalizeType(.{
+                                        .function = .{
+                                            .parameters = .{
+                                                .long = .{
+                                                    .types = long_function.parameters,
+                                                },
+                                            },
+                                            .return_type = try util.mem.createCopy(FQLType, allocator, &fql_type),
+                                        },
+                                    });
+                                }
+                            },
+                            else => std.debug.panic("invalid parser parent state: {s}", .{@tagName(parent.state)}),
+                        }
+
+                        return .{ .save = token };
+                    }
+
+                    defer self.* = .{};
+
+                    return .{ .save = token, .type = fql_type };
+                },
+                else => {
+                    std.debug.panic("invalid parser state: {s}", .{@tagName(self.state)});
+                },
             }
+
+            return .{};
         }
-    }
+    });
+
+    pub const parse = Parser.parseIterator;
 };
 
-pub fn parseType(allocator: std.mem.Allocator, reader: std.io.AnyReader) !FQLType {
-    var it = Tokenizer.TokenIterator.init(reader);
-    defer it.deinit(allocator);
-
-    return FQLType.parse(allocator, &it);
-}
+pub const parseType = FQLType.Parser.parseReader;
 
 fn expectParsedTypeEqual(str: []const u8, expected: FQLType) !void {
+    try parsing.checkForLeaks(FQLType.Parser, str);
+
     var stream = std.io.fixedBufferStream(str);
     var actual = try parseType(testing.allocator, stream.reader().any());
     defer actual.deinit(testing.allocator);
