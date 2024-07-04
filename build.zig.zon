@@ -1,5 +1,5 @@
 .{
-    .name = "fauna-schema-language-parser",
+    .name = "fauna10",
     .version = "0.0.0",
     .dependencies = .{},
     .paths = .{
