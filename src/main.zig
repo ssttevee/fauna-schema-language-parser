@@ -37,8 +37,18 @@ pub fn main() !void {
 
     const allocator = gpa.allocator();
 
-    const stdin = std.io.getStdIn();
-    defer stdin.close();
+    const infile, const filename = blk: {
+        var args = std.process.args();
+        _ = args.next();
+        if (args.next()) |file| {
+            if (file.len != 1 or file[0] != '-') {
+                break :blk .{ try std.fs.cwd().openFile(file, .{}), file };
+            }
+        }
+
+        break :blk .{ std.io.getStdIn(), "-" };
+    };
+    defer infile.close();
 
     const stdout = std.io.getStdOut();
     defer stdout.close();
@@ -47,13 +57,19 @@ pub fn main() !void {
 
     const w = (TeeWriter{ .writers = &.{ stdout.writer().any(), (HashWriter(@TypeOf(hash)){ .context = &hash }).any() } }).writer();
 
-    var it = fauna.TokenIterator.init(stdin.reader().any());
+    var it = fauna.TokenIterator.init(infile.reader().any());
     defer it.deinit(allocator);
 
     while (try it.next(allocator)) |token| {
         it.saveToken(token);
 
-        const expr = try fauna.FQLExpression.parse(allocator, &it);
+        const expr = fauna.FQLExpression.parse(allocator, &it) catch |err| {
+            if (err == error.UnexpectedToken) {
+                std.log.err("at {s}:{d}:{d}", .{ filename, it.tokenizer.current_line + 1, it.tokenizer.current_col + 1 });
+            }
+
+            return err;
+        };
         defer expr.deinit(allocator);
 
         try expr.printCanonical(w.any(), "  ", 0);
