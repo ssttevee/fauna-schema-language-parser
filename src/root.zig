@@ -42,10 +42,8 @@ pub const QueryTree = struct {
         defer it.deinit(allocator);
 
         var exprs = std.ArrayList(FQLExpression).init(allocator);
-        while (try it.next(allocator)) |token| {
-            it.saveToken(token);
-
-            try exprs.append(try FQLExpression.parse(allocator, &it));
+        while (try FQLExpression.parse(allocator, &it)) |expr| {
+            try exprs.append(expr);
         }
 
         return .{
@@ -77,5 +75,20 @@ pub const SchemaTree = struct {
 
             self.allocator.free(self.declarations);
         }
+    }
+
+    pub fn parse(allocator: std.mem.Allocator, reader: std.io.AnyReader) !SchemaTree {
+        var it = Tokenizer.TokenIterator.init(reader);
+        defer it.deinit(allocator);
+
+        var decls = std.ArrayList(SchemaDefinition).init(allocator);
+        while (try SchemaDefinition.parse(allocator, &it)) |decl| {
+            try decls.append(decl);
+        }
+
+        return .{
+            .allocator = allocator,
+            .declarations = try decls.toOwnedSlice(),
+        };
     }
 };

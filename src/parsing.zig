@@ -33,7 +33,7 @@ pub fn ManagedParser(comptime UnmanagedParser: type) type {
             return try self.inner.pushToken(self.allocator, token);
         }
 
-        pub fn parseIterator(allocator: std.mem.Allocator, it: *Tokenizer.TokenIterator) !T {
+        pub fn parseIterator(allocator: std.mem.Allocator, it: *Tokenizer.TokenIterator) !?T {
             var parser = Self.init(allocator);
             defer parser.deinit();
 
@@ -41,18 +41,27 @@ pub fn ManagedParser(comptime UnmanagedParser: type) type {
                 const token = try it.nextToken(allocator);
                 defer token.deinit(allocator);
 
+                // std.debug.print("pushing token {s}\n", .{@tagName(token)});
+
                 const result = try parser.pushToken(token);
                 if (result.save) |save| {
+                    // std.debug.print("saving token {s}\n", .{@tagName(save)});
+
                     it.saveToken(try save.dupe(allocator));
                 }
 
                 if (@field(result, std.meta.fieldNames(PushResult)[1])) |final| {
+                    // std.debug.print("emitting {s} {s}\n", .{ std.meta.fields(PushResult)[1].name, @tagName(final) });
                     return final;
+                }
+
+                if (token == .eof and parser.inner.state == .empty) {
+                    return null;
                 }
             }
         }
 
-        pub fn parseReader(allocator: std.mem.Allocator, reader: std.io.AnyReader) !T {
+        pub fn parseReader(allocator: std.mem.Allocator, reader: std.io.AnyReader) !?T {
             var it = Tokenizer.TokenIterator.init(reader);
             defer it.deinit(allocator);
 

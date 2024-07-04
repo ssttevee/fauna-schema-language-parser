@@ -349,7 +349,7 @@ pub const FQLType = union(enum) {
                 }
             };
 
-            start,
+            empty,
             identifier: []const u8,
             union_lhs: FQLType,
             tuple: State.Tuple,
@@ -363,13 +363,13 @@ pub const FQLType = union(enum) {
                 switch (self) {
                     .identifier => |s| allocator.free(s),
                     inline .tuple, .object, .template, .union_lhs, .short_function, .long_function, .end => |state| state.deinit(allocator),
-                    .start => {},
+                    .empty => {},
                 }
             }
         };
 
         parent: ?*@This() = null,
-        state: State = .start,
+        state: State = .empty,
 
         pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
             if (self.parent) |parent| {
@@ -399,7 +399,7 @@ pub const FQLType = union(enum) {
             }
 
             switch (self.state) {
-                .start => switch (token) {
+                .empty => switch (token) {
                     .string => |str| {
                         self.state = .{
                             .end = .{
@@ -732,7 +732,7 @@ fn expectParsedTypeEqual(str: []const u8, expected: FQLType) !void {
     try parsing.checkForLeaks(FQLType.Parser, str);
 
     var stream = std.io.fixedBufferStream(str);
-    var actual = try parseType(testing.allocator, stream.reader().any());
+    var actual = (try parseType(testing.allocator, stream.reader().any())).?;
     defer actual.deinit(testing.allocator);
 
     try testing.expectEqualDeep(expected, actual);

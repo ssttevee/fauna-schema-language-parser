@@ -60,16 +60,13 @@ pub fn main() !void {
     var it = fauna.TokenIterator.init(infile.reader().any());
     defer it.deinit(allocator);
 
-    while (try it.next(allocator)) |token| {
-        it.saveToken(token);
+    while (fauna.FQLExpression.parse(allocator, &it) catch |err| {
+        if (err == error.UnexpectedToken) {
+            std.log.err("at {s}:{d}:{d}", .{ filename, it.tokenizer.current_line + 1, it.tokenizer.current_col + 1 });
+        }
 
-        const expr = fauna.FQLExpression.parse(allocator, &it) catch |err| {
-            if (err == error.UnexpectedToken) {
-                std.log.err("at {s}:{d}:{d}", .{ filename, it.tokenizer.current_line + 1, it.tokenizer.current_col + 1 });
-            }
-
-            return err;
-        };
+        return err;
+    }) |expr| {
         defer expr.deinit(allocator);
 
         try expr.printCanonical(w.any(), "  ", 0);

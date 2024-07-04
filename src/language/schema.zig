@@ -2221,7 +2221,7 @@ fn expectParsedDefnEqual(str: []const u8, expected: SchemaDefinition) !void {
     try parsing.checkForLeaks(SchemaDefinition.Parser, str);
 
     var stream = std.io.fixedBufferStream(str);
-    var actual = try parseDefinition(testing.allocator, stream.reader().any());
+    var actual = (try parseDefinition(testing.allocator, stream.reader().any())).?;
     defer actual.deinit(testing.allocator);
 
     // std.debug.print("actual: {any}\n", .{actual});

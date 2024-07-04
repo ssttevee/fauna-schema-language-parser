@@ -1005,7 +1005,7 @@ pub const FQLExpression = union(enum) {
 
             switch (self.state) {
                 .empty => switch (token) {
-                    .eol, .semi => {},
+                    .eof, .eol, .semi => {},
 
                     // number literal
                     .number => |num| self.finalizeExpr(.{ .number_literal = try allocator.dupe(u8, num) }),
@@ -1434,6 +1434,7 @@ pub const FQLExpression = union(enum) {
                         }
                     },
                     .end => switch (token) {
+                        .eol => {},
                         .comma => object_literal.state = .start,
                         .rbrace => {
                             self.finalizeExpr(.{
@@ -1808,7 +1809,7 @@ fn expectParsedExprEqual(str: []const u8, expected: FQLExpression) !void {
     try parsing.checkForLeaks(FQLExpression.Parser, str);
 
     var stream = std.io.fixedBufferStream(str);
-    var actual = try parseExpression(testing.allocator, stream.reader().any());
+    var actual = (try parseExpression(testing.allocator, stream.reader().any())).?;
     defer actual.deinit(testing.allocator);
 
     // std.debug.print("actual: {any}\n", .{actual});
