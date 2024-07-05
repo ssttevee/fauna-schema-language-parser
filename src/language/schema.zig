@@ -975,7 +975,7 @@ pub const SchemaDefinition = union(enum) {
             switch (self.state) {
                 .empty => {
                     switch (token) {
-                        .eol => {},
+                        .eof, .eol => {},
                         .annotation => |annotation| {
                             self.state = .{ .annotation = .{ .name = try allocator.dupe(u8, annotation) } };
                         },
