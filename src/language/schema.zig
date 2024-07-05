@@ -2440,7 +2440,7 @@ pub const SchemaDefinition = union(enum) {
                             return .{ .save = res.save };
                         },
                         .before_body => |before_body| {
-                            if (before_body.return_type != null and token == .colon) {
+                            if (before_body.return_type == null and token == .colon) {
                                 function.* = .{
                                     .return_type = .{
                                         .name = before_body.name,
@@ -2456,7 +2456,7 @@ pub const SchemaDefinition = union(enum) {
                                     },
                                 };
                             } else {
-                                if (before_body.return_type != null) {
+                                if (before_body.return_type == null) {
                                     std.log.err("unexpected token: expected colon or lbrace but got {s}", .{@tagName(token)});
                                 } else {
                                     std.log.err("unexpected token: expected lbrace but got {s}", .{@tagName(token)});
@@ -2596,6 +2596,34 @@ test parseDefinition {
                                     },
                                 },
                             },
+                        },
+                    },
+                },
+            },
+        },
+    );
+
+    try expectParsedDefnEqual(
+        \\function MyFunction(x: Number): Number {
+        \\  x + 2
+        \\}
+    ,
+        .{
+            .function = .{
+                .name = "MyFunction",
+                .parameters = &[_]SchemaDefinition.Function.Parameter{
+                    .{
+                        .name = "x",
+                        .type = .{ .named = "Number" },
+                    },
+                },
+                .return_type = .{ .named = "Number" },
+                .body = &[_]FQLExpression{
+                    .{
+                        .binary_operation = .{
+                            .lhs = &FQLExpression{ .identifier = "x" },
+                            .operator = .add,
+                            .rhs = &FQLExpression{ .number_literal = "2" },
                         },
                     },
                 },
