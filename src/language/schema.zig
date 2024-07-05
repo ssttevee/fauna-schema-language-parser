@@ -677,6 +677,7 @@ pub const SchemaDefinition = union(enum) {
 
             try writer.writeByte(')');
             if (self.return_type) |return_type| {
+                try writer.writeAll(": ");
                 try return_type.printCanonical(writer);
             }
 
