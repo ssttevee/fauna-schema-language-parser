@@ -232,7 +232,7 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
                 break :blk .{ .asterisk2, 2 };
             }
 
-            if (!self.is_eof) {
+            if (chars.len == 1 and !self.is_eof) {
                 return error.NeedMoreData;
             }
 
@@ -243,7 +243,7 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
                 break :blk .{ .ampersand2, 2 };
             }
 
-            if (!self.is_eof) {
+            if (chars.len == 1 and !self.is_eof) {
                 return error.NeedMoreData;
             }
 
@@ -254,7 +254,7 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
                 break :blk .{ .bang_equal, 2 };
             }
 
-            if (!self.is_eof) {
+            if (chars.len == 1 and !self.is_eof) {
                 return error.NeedMoreData;
             }
 
@@ -269,7 +269,7 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
                 break :blk .{ .dot3, 3 };
             }
 
-            if (!self.is_eof) {
+            if (chars.len == 1 and !self.is_eof) {
                 return error.NeedMoreData;
             }
 
@@ -280,7 +280,7 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
                 break :blk .{ .larrow_equal, 2 };
             }
 
-            if (!self.is_eof) {
+            if (chars.len == 1 and !self.is_eof) {
                 return error.NeedMoreData;
             }
 
@@ -295,7 +295,7 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
                 break :blk .{ .pipe2, 2 };
             }
 
-            if (!self.is_eof) {
+            if (chars.len == 1 and !self.is_eof) {
                 return error.NeedMoreData;
             }
 
@@ -311,7 +311,7 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
                 }
             }
 
-            if (!self.is_eof) {
+            if (chars.len == 1 and !self.is_eof) {
                 return error.NeedMoreData;
             }
 
@@ -322,7 +322,7 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
                 break :blk .{ .rarrow_equal, 2 };
             }
 
-            if (!self.is_eof) {
+            if (chars.len == 1 and !self.is_eof) {
                 return error.NeedMoreData;
             }
 
@@ -336,7 +336,7 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
                 break :blk null;
             }
 
-            if (!self.is_eof) {
+            if (chars.len == 1 and !self.is_eof) {
                 return error.NeedMoreData;
             }
 
@@ -351,7 +351,7 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
                 }
             }
 
-            if (!self.is_eof) {
+            if (chars.len == 1 and !self.is_eof) {
                 return error.NeedMoreData;
             }
 
@@ -366,7 +366,7 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
                 }
             }
 
-            if (!self.is_eof) {
+            if (chars.len == 1 and !self.is_eof) {
                 return error.NeedMoreData;
             }
 
