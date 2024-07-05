@@ -41,21 +41,21 @@ pub fn ManagedParser(comptime UnmanagedParser: type) type {
                 const token = try it.nextToken(allocator);
                 defer token.deinit(allocator);
 
-                // std.debug.print("pushing token {s}\n", .{@tagName(token)});
+                // std.debug.print("{} pushing token {s}\n", .{ T, @tagName(token) });
 
                 const result = try parser.pushToken(token);
                 if (result.save) |save| {
-                    // std.debug.print("saving token {s}\n", .{@tagName(save)});
+                    // std.debug.print("{} saving token {s}\n", .{ T, @tagName(save) });
 
                     it.saveToken(try save.dupe(allocator));
                 }
 
                 if (@field(result, std.meta.fieldNames(PushResult)[1])) |final| {
-                    // std.debug.print("emitting {s} {s}\n", .{ std.meta.fields(PushResult)[1].name, @tagName(final) });
+                    // std.debug.print("{} emitting {s} {s}\n", .{ T, std.meta.fields(PushResult)[1].name, @tagName(final) });
                     return final;
                 }
 
-                if (token == .eof and parser.inner.state == .empty) {
+                if (token == .eof and parser.inner.state == .empty and (!@hasField(Unmanaged, "parent") or parser.inner.parent == null)) {
                     return null;
                 }
             }

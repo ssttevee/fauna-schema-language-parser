@@ -2150,7 +2150,7 @@ pub const SchemaDefinition = union(enum) {
                             }
                         },
                         .body => |*body| {
-                            if (body.expr_parser.state == .empty and token == .rbrace) {
+                            if (body.expr_parser.state == .empty and body.expr_parser.parent == null and token == .rbrace) {
                                 self.state = .{
                                     .end = .{
                                         .function = .{
