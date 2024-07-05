@@ -150,7 +150,7 @@ const Tokenizer = @This();
 pub fn write(self: *Tokenizer, bytes: []const u8) !usize {
     if (self.buf_start > 0 and self.buf.len - self.buf_end < bytes.len) {
         const new_end = self.buf_end - self.buf_start;
-        std.mem.copyForwards(u8, self.buf[0..new_end], self.buf[self.buf_end..]);
+        std.mem.copyForwards(u8, self.buf[0..new_end], self.buf[self.buf_start..self.buf_end]);
         self.buf_end = new_end;
         self.buf_start = 0;
     }
