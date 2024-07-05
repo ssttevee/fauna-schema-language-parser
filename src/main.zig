@@ -60,7 +60,7 @@ pub fn main() !void {
     var it = fauna.TokenIterator.init(infile.reader().any());
     defer it.deinit(allocator);
 
-    while (fauna.FQLExpression.parse(allocator, &it) catch |err| {
+    while (fauna.SchemaDefinition.parse(allocator, &it) catch |err| {
         if (err == error.UnexpectedToken) {
             std.log.err("at {s}:{d}:{d}", .{ filename, it.tokenizer.current_line + 1, it.tokenizer.current_col + 1 });
         }
@@ -69,7 +69,7 @@ pub fn main() !void {
     }) |expr| {
         defer expr.deinit(allocator);
 
-        try expr.printCanonical(w.any(), "  ", 0);
+        try expr.printCanonical(w.any(), "  ");
         try w.writeByte('\n');
     }
 

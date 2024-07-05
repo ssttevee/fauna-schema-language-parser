@@ -1800,7 +1800,7 @@ pub const FQLExpression = union(enum) {
         }
     });
 
-    pub const parse = Parser.parseIterator;
+    pub const parse = @as(fn (allocator: std.mem.Allocator, it: *Tokenizer.TokenIterator) anyerror!?@This(), Parser.parseIterator);
 };
 
 pub const parseExpression = FQLExpression.Parser.parseReader;

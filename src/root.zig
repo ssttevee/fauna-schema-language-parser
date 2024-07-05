@@ -67,13 +67,13 @@ pub const SchemaTree = struct {
 
     declarations: ?[]SchemaDefinition = null,
 
-    fn deinit(self: @This()) void {
+    pub fn deinit(self: @This()) void {
         if (self.declarations) |declarations| {
             for (declarations) |declaration| {
                 declaration.deinit(self.allocator);
             }
 
-            self.allocator.free(self.declarations);
+            self.allocator.free(declarations);
         }
     }
 
@@ -90,5 +90,14 @@ pub const SchemaTree = struct {
             .allocator = allocator,
             .declarations = try decls.toOwnedSlice(),
         };
+    }
+
+    pub fn printCanonical(self: @This(), writer: std.io.AnyWriter) !void {
+        if (self.declarations) |decls| {
+            for (decls) |decl| {
+                try decl.printCanonical(writer, "    ");
+                try writer.writeByte('\n');
+            }
+        }
     }
 };

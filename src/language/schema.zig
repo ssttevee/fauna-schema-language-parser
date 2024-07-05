@@ -21,6 +21,20 @@ pub const SchemaDefinition = union(enum) {
                         predicate.deinit(allocator);
                     }
                 }
+
+                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                    try writer.writeAll("role ");
+                    try writer.writeAll(self.name);
+                    if (self.predicate) |predicate| {
+                        try writer.writeAll(" {\n");
+                        try writer.writeBytesNTimes(indent_str, 2);
+                        try writer.writeAll("predicate ");
+                        try predicate.printCanonical(writer, indent_str, 2);
+                        try writer.writeByte('\n');
+                        try writer.writeAll(indent_str);
+                        try writer.writeByte('}');
+                    }
+                }
             };
 
             issuer: []const u8,
@@ -35,6 +49,17 @@ pub const SchemaDefinition = union(enum) {
                     => |s| allocator.free(s),
                     .role => |r| r.deinit(allocator),
                     .ttl => {},
+                }
+            }
+
+            pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                switch (self) {
+                    .role => |role| try role.printCanonical(writer, indent_str),
+                    inline else => |member, tag| {
+                        try writer.writeAll(@tagName(tag));
+                        try writer.writeByte(' ');
+                        try writer.writeAll(member);
+                    },
                 }
             }
         };
@@ -53,6 +78,22 @@ pub const SchemaDefinition = union(enum) {
 
             allocator.free(self.name);
         }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+            try writer.writeAll("access provider ");
+            try writer.writeAll(self.name);
+            try writer.writeAll(" {\n");
+
+            if (self.members) |members| {
+                for (members) |member| {
+                    try writer.writeAll(indent_str);
+                    try member.printCanonical(writer, indent_str);
+                    try writer.writeByte('\n');
+                }
+            }
+
+            try writer.writeAll("}\n");
+        }
     };
 
     pub const Collection = struct {
@@ -69,6 +110,15 @@ pub const SchemaDefinition = union(enum) {
 
                     self.type.deinit(allocator);
                     allocator.free(self.name);
+                }
+
+                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                    try writer.writeAll(self.name);
+                    try writer.writeAll(": ");
+                    try self.type.printCanonical(writer);
+                    if (self.default) |default| {
+                        try default.printCanonical(writer, indent_str, 2);
+                    }
                 }
             };
 
@@ -90,6 +140,23 @@ pub const SchemaDefinition = union(enum) {
                             },
                         }
                     }
+
+                    pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                        try writer.writeAll(@tagName(self));
+                        try writer.writeAll(" [");
+                        switch (self) {
+                            inline else => |exprs| {
+                                for (exprs, 0..) |expr, i| {
+                                    if (i > 0) {
+                                        try writer.writeAll(", ");
+                                    }
+
+                                    try expr.printCanonical(writer, indent_str, 3);
+                                }
+                            },
+                        }
+                        try writer.writeAll("]");
+                    }
                 };
 
                 name: []const u8,
@@ -106,6 +173,22 @@ pub const SchemaDefinition = union(enum) {
 
                     allocator.free(self.name);
                 }
+
+                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                    try writer.writeAll("index ");
+                    try writer.writeAll(self.name);
+                    try writer.writeAll(" {\n");
+                    if (self.members) |members| {
+                        for (members) |member| {
+                            try writer.writeBytesNTimes(indent_str, 2);
+                            try member.printCanonical(writer, indent_str);
+                            try writer.writeByte('\n');
+                        }
+                    }
+
+                    try writer.writeAll(indent_str);
+                    try writer.writeAll("}");
+                }
             };
 
             pub const Migration = union(enum) {
@@ -117,6 +200,12 @@ pub const SchemaDefinition = union(enum) {
                         self.name.deinit(allocator);
                         self.value.deinit(allocator);
                     }
+
+                    pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                        try self.name.printCanonical(writer, indent_str, 2);
+                        try writer.writeAll(" = ");
+                        try self.value.printCanonical(writer, indent_str, 2);
+                    }
                 };
 
                 pub const Move = struct {
@@ -126,6 +215,12 @@ pub const SchemaDefinition = union(enum) {
                     fn deinit(self: @This(), allocator: std.mem.Allocator) void {
                         self.old_name.deinit(allocator);
                         self.new_name.deinit(allocator);
+                    }
+
+                    pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                        try self.old_name.printCanonical(writer, indent_str, 2);
+                        try writer.writeAll(" -> ");
+                        try self.new_name.printCanonical(writer, indent_str, 2);
                     }
                 };
 
@@ -140,6 +235,18 @@ pub const SchemaDefinition = union(enum) {
 
                         allocator.free(self.new_names);
                         self.old_name.deinit(allocator);
+                    }
+
+                    pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                        try self.old_name.printCanonical(writer, indent_str, 2);
+                        try writer.writeAll(" -> ");
+                        for (self.new_names, 0..) |new_name, i| {
+                            if (i > 0) {
+                                try writer.writeAll(", ");
+                            }
+
+                            try new_name.printCanonical(writer, indent_str, 2);
+                        }
                     }
                 };
 
@@ -156,6 +263,15 @@ pub const SchemaDefinition = union(enum) {
                         inline else => |e| e.deinit(allocator),
                     }
                 }
+
+                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                    try writer.writeAll(@tagName(self));
+                    try writer.writeByte(' ');
+                    switch (self) {
+                        inline .backfill, .move, .split => |member| try member.printCanonical(writer, indent_str),
+                        inline else => |member| try member.printCanonical(writer, indent_str, 2),
+                    }
+                }
             };
 
             pub const UniqueConstraint = struct {
@@ -170,6 +286,21 @@ pub const SchemaDefinition = union(enum) {
                         allocator.free(terms);
                     }
                 }
+
+                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                    try writer.writeAll("unique [");
+                    if (self.terms) |terms| {
+                        for (terms, 0..) |term, i| {
+                            if (i > 0) {
+                                try writer.writeAll(", ");
+                            }
+
+                            try term.printCanonical(writer, indent_str, 3);
+                        }
+                    }
+
+                    try writer.writeAll("]");
+                }
             };
 
             pub const CheckConstraint = struct {
@@ -179,6 +310,13 @@ pub const SchemaDefinition = union(enum) {
                 fn deinit(self: @This(), allocator: std.mem.Allocator) void {
                     self.predicate.deinit(allocator);
                     allocator.free(self.name);
+                }
+
+                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                    try writer.writeAll("check ");
+                    try writer.writeAll(self.name);
+                    try writer.writeAll(" ");
+                    try self.predicate.printCanonical(writer, indent_str, 2);
                 }
             };
 
@@ -194,6 +332,17 @@ pub const SchemaDefinition = union(enum) {
 
                     self.function.deinit(allocator);
                     allocator.free(self.name);
+                }
+
+                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                    try writer.writeAll("compute ");
+                    try writer.writeAll(self.name);
+                    if (self.type) |fql_type| {
+                        try writer.writeAll(": ");
+                        try fql_type.printCanonical(writer);
+                    }
+                    try writer.writeAll(" = ");
+                    try self.function.printCanonical(writer, indent_str, 2);
                 }
             };
 
@@ -226,6 +375,28 @@ pub const SchemaDefinition = union(enum) {
                     else => {},
                 }
             }
+
+            pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                switch (self) {
+                    inline .field, .index, .unique_constraint, .check_constraint, .computed_field => |prop| try prop.printCanonical(writer, indent_str),
+                    inline .history_days, .ttl_days => |s, tag| {
+                        try writer.writeAll(@tagName(tag));
+                        try writer.writeByte(' ');
+                        try writer.writeAll(s);
+                    },
+                    .document_ttls => |document_ttls| try std.fmt.format(writer, "document_ttls {?}", .{document_ttls}),
+                    .migrations => |migrations| {
+                        try writer.writeAll("migrations {\n");
+                        for (migrations) |migration| {
+                            try writer.writeBytesNTimes(indent_str, 2);
+                            try migration.printCanonical(writer, indent_str);
+                            try writer.writeByte('\n');
+                        }
+                        try writer.writeAll(indent_str);
+                        try writer.writeByte('}');
+                    },
+                }
+            }
         };
 
         alias: ?FQLExpression = null,
@@ -248,6 +419,28 @@ pub const SchemaDefinition = union(enum) {
 
             allocator.free(self.name);
         }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+            if (self.alias) |alias| {
+                try writer.writeAll("@alias(");
+                try alias.printCanonical(writer, indent_str, 1);
+                try writer.writeAll(")\n");
+            }
+
+            try writer.writeAll("collection ");
+            try writer.writeAll(self.name);
+            try writer.writeAll(" {\n");
+
+            if (self.members) |members| {
+                for (members) |member| {
+                    try writer.writeAll(indent_str);
+                    try member.printCanonical(writer, indent_str);
+                    try writer.writeByte('\n');
+                }
+            }
+
+            try writer.writeAll("}\n");
+        }
     };
 
     pub const Role = struct {
@@ -262,6 +455,20 @@ pub const SchemaDefinition = union(enum) {
                     }
 
                     allocator.free(self.collection);
+                }
+
+                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                    try writer.writeAll(self.collection);
+
+                    if (self.predicate) |predicate| {
+                        try writer.writeAll(" {\n");
+                        try writer.writeBytesNTimes(indent_str, 2);
+                        try writer.writeAll("predicate ");
+                        try predicate.printCanonical(writer, indent_str, 2);
+                        try writer.writeByte('\n');
+                        try writer.writeAll(indent_str);
+                        try writer.writeByte('}');
+                    }
                 }
             };
 
@@ -285,6 +492,19 @@ pub const SchemaDefinition = union(enum) {
                             predicate.deinit(allocator);
                         }
                     }
+
+                    pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                        try writer.writeAll(@tagName(self.action));
+                        if (self.predicate) |predicate| {
+                            try writer.writeAll(" {\n");
+                            try writer.writeBytesNTimes(indent_str, 3);
+                            try writer.writeAll("predicate ");
+                            try predicate.printCanonical(writer, indent_str, 3);
+                            try writer.writeByte('\n');
+                            try writer.writeBytesNTimes(indent_str, 2);
+                            try writer.writeByte('}');
+                        }
+                    }
                 };
 
                 resource: []const u8,
@@ -301,6 +521,22 @@ pub const SchemaDefinition = union(enum) {
 
                     allocator.free(self.resource);
                 }
+
+                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                    try writer.writeAll(self.resource);
+                    try writer.writeAll(" {\n");
+
+                    if (self.actions) |actions| {
+                        for (actions) |action| {
+                            try writer.writeBytesNTimes(indent_str, 2);
+                            try action.printCanonical(writer, indent_str);
+                            try writer.writeByte('\n');
+                        }
+                    }
+
+                    try writer.writeAll(indent_str);
+                    try writer.writeByte('}');
+                }
             };
 
             membership: Membership,
@@ -309,6 +545,15 @@ pub const SchemaDefinition = union(enum) {
             fn deinit(self: @This(), allocator: std.mem.Allocator) void {
                 switch (self) {
                     inline else => |d| d.deinit(allocator),
+                }
+            }
+
+            pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                try writer.writeAll(@tagName(self));
+                try writer.writeByte(' ');
+
+                switch (self) {
+                    inline else => |member| try member.printCanonical(writer, indent_str),
                 }
             }
         };
@@ -326,6 +571,22 @@ pub const SchemaDefinition = union(enum) {
             }
 
             allocator.free(self.name);
+        }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+            try writer.writeAll("role ");
+            try writer.writeAll(self.name);
+            try writer.writeAll(" {\n");
+
+            if (self.members) |members| {
+                for (members) |member| {
+                    try writer.writeAll(indent_str);
+                    try member.printCanonical(writer, indent_str);
+                    try writer.writeByte('\n');
+                }
+            }
+
+            try writer.writeAll("}\n");
         }
     };
 
@@ -382,6 +643,55 @@ pub const SchemaDefinition = union(enum) {
 
             allocator.free(self.name);
         }
+
+        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+            if (self.alias) |alias| {
+                try writer.writeAll("@alias(");
+                try alias.printCanonical(writer, indent_str, 1);
+                try writer.writeAll(")\n");
+            }
+
+            if (self.role) |role| {
+                try writer.writeAll("@role(");
+                try role.printCanonical(writer, indent_str, 1);
+                try writer.writeAll(")\n");
+            }
+
+            try writer.writeAll("function ");
+            try writer.writeAll(self.name);
+            try writer.writeByte('(');
+
+            if (self.parameters) |parameters| {
+                for (parameters, 0..) |parameter, i| {
+                    if (i > 0) {
+                        try writer.writeAll(", ");
+                    }
+
+                    try writer.writeAll(parameter.name);
+                    if (parameter.type) |param_type| {
+                        try writer.writeAll(": ");
+                        try param_type.printCanonical(writer);
+                    }
+                }
+            }
+
+            try writer.writeByte(')');
+            if (self.return_type) |return_type| {
+                try return_type.printCanonical(writer);
+            }
+
+            try writer.writeAll(" {\n");
+
+            if (self.body) |exprs| {
+                for (exprs) |expr| {
+                    try writer.writeAll(indent_str);
+                    try expr.printCanonical(writer, indent_str, 1);
+                    try writer.writeByte('\n');
+                }
+            }
+
+            try writer.writeAll("}\n");
+        }
     };
 
     access_provider: AccessProvider,
@@ -392,6 +702,12 @@ pub const SchemaDefinition = union(enum) {
     pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
         switch (self) {
             inline else => |d| d.deinit(allocator),
+        }
+    }
+
+    pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+        switch (self) {
+            inline else => |def| try def.printCanonical(writer, indent_str),
         }
     }
 
@@ -2212,7 +2528,7 @@ pub const SchemaDefinition = union(enum) {
         }
     });
 
-    pub const parse = Parser.parseIterator;
+    pub const parse = @as(fn (allocator: std.mem.Allocator, it: *Tokenizer.TokenIterator) anyerror!?@This(), Parser.parseIterator);
 };
 
 pub const parseDefinition = SchemaDefinition.Parser.parseReader;
