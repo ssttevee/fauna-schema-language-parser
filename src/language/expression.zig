@@ -759,6 +759,159 @@ pub const FQLExpression = union(enum) {
         return try str.toOwnedSlice();
     }
 
+    fn nthChild(self: *const FQLExpression, n: usize) ?*const FQLExpression {
+        switch (self.*) {
+            .null, .identifier, .number_literal, .string_literal, .boolean_literal => {},
+            inline .isolated, .non_null_assertion => |expr| {
+                if (n == 0) {
+                    return expr;
+                }
+            },
+            .array_literal => |array_literal| {
+                if (array_literal.elements) |elements| {
+                    if (n < elements.len) {
+                        return &elements[n];
+                    }
+                }
+            },
+            .object_literal => |object_literal| {
+                if (object_literal.fields) |fields| {
+                    if (n < fields.len) {
+                        return fields[n].value;
+                    }
+                }
+            },
+            .unary_operation => |unary_operation| {
+                if (n == 0) {
+                    return unary_operation.operand;
+                }
+            },
+            .binary_operation => |binary_operation| {
+                if (n == 0) {
+                    return binary_operation.lhs;
+                }
+
+                if (n == 1) {
+                    return binary_operation.rhs;
+                }
+            },
+            .field_access => |field_access| {
+                if (n == 0) {
+                    return field_access.value;
+                }
+
+                if (n == 1 and field_access.field == .expression) {
+                    return field_access.field.expression;
+                }
+            },
+            .invocation => |invocation| {
+                if (n == 0) {
+                    return invocation.function;
+                }
+
+                if (invocation.arguments) |arguments| {
+                    if (n - 1 < arguments.len) {
+                        return &arguments[n - 1];
+                    }
+                }
+            },
+            .variable_declaration => |variable_declaration| {
+                if (n == 0) {
+                    return variable_declaration.value;
+                }
+            },
+            .block_scope => |exprs| {
+                if (n < exprs.len) {
+                    return &exprs[n];
+                }
+            },
+            .conditional => |conditional| {
+                if (n == 0) {
+                    return conditional.condition;
+                }
+
+                if (n == 1) {
+                    return conditional.body;
+                }
+
+                if (n == 2) {
+                    if (conditional.@"else") |expr| {
+                        return expr;
+                    }
+                }
+            },
+            .function => |function| {
+                if (n == 0) {
+                    return function.body;
+                }
+            },
+            .anonymous_field_access => |anonymous_field_access| {
+                if (n == 0 and anonymous_field_access == .expression) {
+                    return anonymous_field_access.expression;
+                }
+            },
+            .projection => |projection| {
+                if (n == 0) {
+                    return projection.expression;
+                }
+
+                if (projection.fields) |fields| {
+                    var i: usize = 0;
+                    for (fields) |field| {
+                        if (field == .long) {
+                            if (i == n - 1) {
+                                return field.long.value;
+                            }
+
+                            i += 1;
+                        }
+                    }
+                }
+            },
+        }
+
+        return null;
+    }
+
+    pub const Walker = struct {
+        allocator: std.mem.Allocator,
+        root: *const FQLExpression,
+        initialized: bool = false,
+        stack: std.ArrayListUnmanaged(struct { expr: *const FQLExpression, next_child: usize = 0 }) = .{},
+
+        pub fn deinit(self: Walker) void {
+            @constCast(&self.stack).deinit(self.allocator);
+        }
+
+        pub fn next(self: *Walker) !?*const FQLExpression {
+            if (!self.initialized) {
+                self.initialized = true;
+                try self.stack.append(self.allocator, .{ .expr = self.root, .next_child = 0 });
+                return self.root;
+            }
+
+            while (self.stack.items.len > 0) {
+                const last_node = &self.stack.items[self.stack.items.len - 1];
+                if (last_node.expr.nthChild(last_node.next_child)) |child_expr| {
+                    try self.stack.append(self.allocator, .{ .expr = child_expr });
+                    last_node.next_child += 1;
+                    return child_expr;
+                } else {
+                    self.stack.items.len -= 1;
+                }
+            } else {
+                return null;
+            }
+        }
+    };
+
+    pub fn walk(self: *const FQLExpression, allocator: std.mem.Allocator) Walker {
+        return .{
+            .allocator = allocator,
+            .root = self,
+        };
+    }
+
     fn isIdentifier(self: FQLExpression) bool {
         return self == .identifier;
     }
@@ -2144,4 +2297,364 @@ test parseExpression {
             },
         },
     );
+}
+
+test "walk" {
+    {
+        const expr: FQLExpression = .null;
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqualDeep(&expr, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .array_literal = .{
+                .elements = &[_]FQLExpression{
+                    .{ .boolean_literal = true },
+                    .{ .boolean_literal = false },
+                },
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(&expr.array_literal.elements.?[0], try walker.next());
+        try testing.expectEqual(&expr.array_literal.elements.?[1], try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .array_literal = .{
+                .elements = &[_]FQLExpression{
+                    .{ .boolean_literal = true },
+                    .{ .boolean_literal = false },
+                },
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(&expr.array_literal.elements.?[0], try walker.next());
+        try testing.expectEqual(&expr.array_literal.elements.?[1], try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .object_literal = .{
+                .fields = &[_]FQLExpression.ObjectLiteral.Field{
+                    .{
+                        .key = .{ .identifier = "hello" },
+                        .value = &FQLExpression{ .string_literal = "world" },
+                    },
+                },
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(expr.object_literal.fields.?[0].value, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .unary_operation = .{
+                .operand = &FQLExpression{ .boolean_literal = false },
+                .operator = .logical_not,
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(expr.unary_operation.operand, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .unary_operation = .{
+                .operand = &FQLExpression{ .boolean_literal = false },
+                .operator = .logical_not,
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(expr.unary_operation.operand, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .binary_operation = .{
+                .lhs = &FQLExpression{ .string_literal = "foo" },
+                .operator = .add,
+                .rhs = &FQLExpression{ .string_literal = "bar" },
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(expr.binary_operation.lhs, try walker.next());
+        try testing.expectEqual(expr.binary_operation.rhs, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .field_access = .{
+                .value = &FQLExpression{ .string_literal = "foo" },
+                .field = .{
+                    .identifier = "length",
+                },
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(expr.field_access.value, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .field_access = .{
+                .value = &FQLExpression{ .string_literal = "foo" },
+                .field = .{
+                    .expression = &FQLExpression{ .string_literal = "length" },
+                },
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(expr.field_access.value, try walker.next());
+        try testing.expectEqual(expr.field_access.field.expression, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .invocation = .{
+                .function = &FQLExpression{ .identifier = "log" },
+                .arguments = &[_]FQLExpression{
+                    .{ .string_literal = "foo" },
+                },
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(expr.invocation.function, try walker.next());
+        try testing.expectEqual(&expr.invocation.arguments.?[0], try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .variable_declaration = .{
+                .name = "foo",
+                .value = &FQLExpression{
+                    .string_literal = "bar",
+                },
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(expr.variable_declaration.value, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .block_scope = &[_]FQLExpression{
+                .{ .string_literal = "foo" },
+                .{ .string_literal = "bar" },
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(&expr.block_scope[0], try walker.next());
+        try testing.expectEqual(&expr.block_scope[1], try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .conditional = .{
+                .condition = &FQLExpression{ .boolean_literal = true },
+                .body = &FQLExpression{ .number_literal = "42" },
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(expr.conditional.condition, try walker.next());
+        try testing.expectEqual(expr.conditional.body, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .conditional = .{
+                .condition = &FQLExpression{ .identifier = "foo" },
+                .body = &FQLExpression{ .number_literal = "42" },
+                .@"else" = &FQLExpression{ .number_literal = "69" },
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(expr.conditional.condition, try walker.next());
+        try testing.expectEqual(expr.conditional.body, try walker.next());
+        try testing.expectEqual(expr.conditional.@"else".?, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .isolated = &FQLExpression{ .identifier = "foo" },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(expr.isolated, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .function = .{
+                .parameters = .{ .long = .{} },
+                .body = &FQLExpression{ .string_literal = "deez nuts" },
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(expr.function.body, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .anonymous_field_access = .{
+                .identifier = "foo",
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .anonymous_field_access = .{
+                .expression = &FQLExpression{ .string_literal = "foo" },
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(expr.anonymous_field_access.expression, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .projection = .{
+                .expression = &FQLExpression{ .identifier = "foo" },
+                .fields = &[_]FQLExpression.Projection.Field{
+                    .{ .short = "length" },
+                },
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(expr.projection.expression, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .projection = .{
+                .expression = &FQLExpression{ .identifier = "foo" },
+                .fields = &[_]FQLExpression.Projection.Field{
+                    .{ .short = "length" },
+                    .{
+                        .long = .{
+                            .key = "zero",
+                            .value = &FQLExpression{ .number_literal = "0" },
+                        },
+                    },
+                },
+            },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(expr.projection.expression, try walker.next());
+        try testing.expectEqual(expr.projection.fields.?[1].long.value, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const expr: FQLExpression = .{
+            .non_null_assertion = &FQLExpression{ .identifier = "foo" },
+        };
+
+        var walker = expr.walk(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqual(&expr, try walker.next());
+        try testing.expectEqual(expr.non_null_assertion, try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
 }
