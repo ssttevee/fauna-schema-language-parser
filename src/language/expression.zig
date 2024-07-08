@@ -1552,6 +1552,7 @@ pub const FQLExpression = union(enum) {
                             else => {
                                 // it's probably a block scope
                                 self.state = .{ .block_scope = .{} };
+                                try self.startChildState(allocator);
                                 return .{ .save = token };
                             },
                         }
@@ -2020,6 +2021,22 @@ test parseExpression {
             .rhs = &FQLExpression{ .number_literal = "2" },
         },
     });
+
+    try expectParsedExprEqual(
+        \\{
+        \\    []
+        \\}
+    ,
+        .{
+            .block_scope = &[_]FQLExpression{
+                .{
+                    .array_literal = .{
+                        .elements = &[_]FQLExpression{},
+                    },
+                },
+            },
+        },
+    );
 
     try expectParsedExprEqual(
         \\"Hello " + [
