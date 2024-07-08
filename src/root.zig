@@ -37,12 +37,18 @@ pub const QueryTree = struct {
         }
     }
 
-    pub fn parse(allocator: std.mem.Allocator, reader: std.io.AnyReader) !QueryTree {
+    pub fn parse(allocator: std.mem.Allocator, reader: std.io.AnyReader, filename: []const u8) !QueryTree {
         var it = Tokenizer.TokenIterator.init(reader);
         defer it.deinit(allocator);
 
         var exprs = std.ArrayList(FQLExpression).init(allocator);
-        while (try FQLExpression.parse(allocator, &it)) |expr| {
+        while (FQLExpression.parse(allocator, &it) catch |err| {
+            if (err == error.UnexpectedToken) {
+                std.log.err("at {s}:{d}:{d}", .{ filename, it.tokenizer.current_line + 1, it.tokenizer.current_col + 1 });
+            }
+
+            return err;
+        }) |expr| {
             try exprs.append(expr);
         }
 
@@ -77,12 +83,18 @@ pub const SchemaTree = struct {
         }
     }
 
-    pub fn parse(allocator: std.mem.Allocator, reader: std.io.AnyReader) !SchemaTree {
+    pub fn parse(allocator: std.mem.Allocator, reader: std.io.AnyReader, filename: []const u8) !SchemaTree {
         var it = Tokenizer.TokenIterator.init(reader);
         defer it.deinit(allocator);
 
         var decls = std.ArrayList(SchemaDefinition).init(allocator);
-        while (try SchemaDefinition.parse(allocator, &it)) |decl| {
+        while (SchemaDefinition.parse(allocator, &it) catch |err| {
+            if (err == error.UnexpectedToken) {
+                std.log.err("at {s}:{d}:{d}", .{ filename, it.tokenizer.current_line + 1, it.tokenizer.current_col + 1 });
+            }
+
+            return err;
+        }) |decl| {
             try decls.append(decl);
         }
 
