@@ -874,41 +874,57 @@ pub const FQLExpression = union(enum) {
     }
 
     pub const Walker = struct {
-        allocator: std.mem.Allocator,
-        root: *const FQLExpression,
-        initialized: bool = false,
-        stack: std.ArrayListUnmanaged(struct { expr: *const FQLExpression, next_child: usize = 0 }) = .{},
+        pub const Unmanaged = struct {
+            root: *const FQLExpression,
+            initialized: bool = false,
+            stack: std.ArrayListUnmanaged(struct { expr: *const FQLExpression, next_child: usize = 0 }) = .{},
 
-        pub fn deinit(self: Walker) void {
-            @constCast(&self.stack).deinit(self.allocator);
+            pub fn deinit(self: *Unmanaged, allocator: std.mem.Allocator) void {
+                self.stack.deinit(allocator);
+                self.* = undefined;
+            }
+
+            pub fn next(self: *Unmanaged, allocator: std.mem.Allocator) !?*const FQLExpression {
+                if (!self.initialized) {
+                    self.initialized = true;
+                    try self.stack.append(allocator, .{ .expr = self.root, .next_child = 0 });
+                    return self.root;
+                }
+
+                while (self.stack.items.len > 0) {
+                    const last_node = &self.stack.items[self.stack.items.len - 1];
+                    if (last_node.expr.nthChild(last_node.next_child)) |child_expr| {
+                        try self.stack.append(allocator, .{ .expr = child_expr });
+                        last_node.next_child += 1;
+                        return child_expr;
+                    } else {
+                        self.stack.items.len -= 1;
+                    }
+                } else {
+                    return null;
+                }
+            }
+        };
+
+        allocator: std.mem.Allocator,
+        inner: Unmanaged,
+
+        pub fn deinit(self: *Walker) void {
+            self.inner.deinit(self.allocator);
+            self.* = undefined;
         }
 
         pub fn next(self: *Walker) !?*const FQLExpression {
-            if (!self.initialized) {
-                self.initialized = true;
-                try self.stack.append(self.allocator, .{ .expr = self.root, .next_child = 0 });
-                return self.root;
-            }
-
-            while (self.stack.items.len > 0) {
-                const last_node = &self.stack.items[self.stack.items.len - 1];
-                if (last_node.expr.nthChild(last_node.next_child)) |child_expr| {
-                    try self.stack.append(self.allocator, .{ .expr = child_expr });
-                    last_node.next_child += 1;
-                    return child_expr;
-                } else {
-                    self.stack.items.len -= 1;
-                }
-            } else {
-                return null;
-            }
+            return try self.inner.next(self.allocator);
         }
     };
 
     pub fn walk(self: *const FQLExpression, allocator: std.mem.Allocator) Walker {
         return .{
             .allocator = allocator,
-            .root = self,
+            .inner = .{
+                .root = self,
+            },
         };
     }
 

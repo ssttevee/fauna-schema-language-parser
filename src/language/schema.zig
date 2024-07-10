@@ -693,6 +693,46 @@ pub const SchemaDefinition = union(enum) {
 
             try writer.writeAll("}\n");
         }
+
+        pub const Walker = struct {
+            allocator: std.mem.Allocator,
+            function: *const Function,
+            pos: usize = 0,
+            walker: ?FQLExpression.Walker.Unmanaged = null,
+
+            pub fn deinit(self: *Walker) void {
+                self.* = undefined;
+            }
+
+            pub fn next(self: *Walker) !?*const FQLExpression {
+                if (self.walker) |*walker| {
+                    if (try walker.next(self.allocator)) |expr| {
+                        return expr;
+                    } else {
+                        walker.deinit(self.allocator);
+                        self.walker = null;
+                    }
+                }
+
+                if (self.function.body) |body| {
+                    if (self.pos < body.len) {
+                        self.walker = .{ .root = &body[self.pos] };
+                        self.pos += 1;
+
+                        return self.next();
+                    }
+                }
+
+                return null;
+            }
+        };
+
+        pub fn walkBody(self: *const Function, allocator: std.mem.Allocator) Walker {
+            return .{
+                .allocator = allocator,
+                .function = self,
+            };
+        }
     };
 
     access_provider: AccessProvider,
@@ -3230,4 +3270,46 @@ test parseDefinition {
             },
         },
     );
+}
+
+test "function walk body" {
+    {
+        const function = SchemaDefinition.Function{
+            .name = "foo",
+        };
+
+        var walker = function.walkBody(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const function = SchemaDefinition.Function{
+            .name = "foo",
+            .body = &[_]FQLExpression{},
+        };
+
+        var walker = function.walkBody(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqualDeep(null, try walker.next());
+    }
+
+    {
+        const function = SchemaDefinition.Function{
+            .name = "foo",
+            .body = &[_]FQLExpression{
+                .{ .identifier = "hello" },
+                .{ .identifier = "world" },
+            },
+        };
+
+        var walker = function.walkBody(testing.allocator);
+        defer walker.deinit();
+
+        try testing.expectEqualDeep(&function.body.?[0], try walker.next());
+        try testing.expectEqualDeep(&function.body.?[1], try walker.next());
+        try testing.expectEqualDeep(null, try walker.next());
+    }
 }
