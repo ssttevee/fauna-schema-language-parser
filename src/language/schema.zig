@@ -2371,6 +2371,10 @@ pub const SchemaDefinition = union(enum) {
                                         .word => |word| {
                                             params.param_state = .{ .after_name = try allocator.dupe(u8, word) };
                                         },
+                                        .rparen => {
+                                            params.param_state = .end;
+                                            return .{ .save = token };
+                                        },
                                         else => {
                                             std.log.err("unexpected token: expected word but got {s}", .{@tagName(token)});
                                             return error.UnexpectedToken;
@@ -2627,6 +2631,22 @@ test parseDefinition {
                             .rhs = &FQLExpression{ .number_literal = "2" },
                         },
                     },
+                },
+            },
+        },
+    );
+
+    try expectParsedDefnEqual(
+        \\function noparams() {
+        \\  "hi"
+        \\}
+    ,
+        .{
+            .function = .{
+                .name = "noparams",
+                .parameters = &.{},
+                .body = &[_]FQLExpression{
+                    .{ .string_literal = "\"hi\"" },
                 },
             },
         },
