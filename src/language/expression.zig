@@ -894,8 +894,8 @@ pub const FQLExpression = union(enum) {
                 while (self.stack.items.len > 0) {
                     const last_node = &self.stack.items[self.stack.items.len - 1];
                     if (last_node.expr.nthChild(last_node.next_child)) |child_expr| {
-                        try self.stack.append(allocator, .{ .expr = child_expr });
                         last_node.next_child += 1;
+                        try self.stack.append(allocator, .{ .expr = child_expr });
                         return child_expr;
                     } else {
                         self.stack.items.len -= 1;
