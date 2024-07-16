@@ -37,6 +37,13 @@ pub const QueryTree = struct {
         }
     }
 
+    pub fn parseFile(allocator: std.mem.Allocator, filename: []const u8) !SchemaTree {
+        var f = try std.fs.cwd().openFile(filename, .{});
+        defer f.close();
+
+        return try parse(allocator, f.reader().any(), filename);
+    }
+
     pub fn parse(allocator: std.mem.Allocator, reader: std.io.AnyReader, filename: []const u8) !QueryTree {
         var it = Tokenizer.TokenIterator.init(reader);
         defer it.deinit(allocator);
@@ -81,6 +88,13 @@ pub const SchemaTree = struct {
 
             self.allocator.free(declarations);
         }
+    }
+
+    pub fn parseFile(allocator: std.mem.Allocator, filename: []const u8) !SchemaTree {
+        var f = try std.fs.cwd().openFile(filename, .{});
+        defer f.close();
+
+        return try parse(allocator, f.reader().any(), filename);
     }
 
     pub fn parse(allocator: std.mem.Allocator, reader: std.io.AnyReader, filename: []const u8) !SchemaTree {
