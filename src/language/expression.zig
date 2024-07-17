@@ -1619,21 +1619,20 @@ pub const FQLExpression = union(enum) {
                         },
                     },
                 },
-                .invocation => |invocation| {
-                    if (token != .rparen) {
-                        try self.startChildState(allocator);
-                        return .{ .save = token };
+                .invocation => |*invocation| {
+                    if (token != .eol) {
+                        if (token != .rparen) {
+                            try self.startChildState(allocator);
+                            return .{ .save = token };
+                        }
+
+                        self.finalizeExpr(.{
+                            .invocation = .{
+                                .function = try util.mem.createCopy(FQLExpression, allocator, &invocation.function),
+                                .arguments = try invocation.arguments.toOwnedSlice(allocator),
+                            },
+                        });
                     }
-
-                    var args = invocation.arguments;
-                    defer args.deinit(allocator);
-
-                    self.finalizeExpr(.{
-                        .invocation = .{
-                            .function = try util.mem.createCopy(FQLExpression, allocator, &invocation.function),
-                            .arguments = try args.toOwnedSlice(allocator),
-                        },
-                    });
                 },
                 .end => |expr| {
                     switch (token) {
@@ -1701,6 +1700,10 @@ pub const FQLExpression = union(enum) {
                         },
                     }
 
+                    if (token == .eol) {
+                        return .{};
+                    }
+
                     if (self.parent) |parent| {
                         defer allocator.destroy(parent);
                         defer self.* = parent.*;
@@ -1743,21 +1746,17 @@ pub const FQLExpression = union(enum) {
                                 try array_literal.elements.append(allocator, expr);
                             },
                             .invocation => |*invocation| switch (token) {
-                                .eol => {},
                                 .comma => {
                                     try invocation.arguments.append(allocator, expr);
                                     return .{};
                                 },
                                 .rparen => {
-                                    var args = invocation.arguments;
-                                    defer args.deinit(allocator);
-
-                                    try args.append(allocator, expr);
+                                    try invocation.arguments.append(allocator, expr);
 
                                     parent.finalizeExpr(.{
                                         .invocation = .{
                                             .function = try util.mem.createCopy(FQLExpression, allocator, &invocation.function),
-                                            .arguments = try args.toOwnedSlice(allocator),
+                                            .arguments = try invocation.arguments.toOwnedSlice(allocator),
                                         },
                                     });
 

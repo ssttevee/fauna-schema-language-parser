@@ -1321,11 +1321,14 @@ pub const SchemaDefinition = union(enum) {
             definition: ?SchemaDefinition = null,
         };
 
-        pub fn pushToken(self: *@This(), allocator: std.mem.Allocator, token: Tokenizer.Token) !PushResult {
+        pub fn pushToken(self: *@This(), allocator: std.mem.Allocator, token_: Tokenizer.Token) !PushResult {
             // std.debug.print("schema parser state: {s}\n", .{@tagName(self.state)});
             // std.debug.print("got token: {any}\n", .{token});
 
-            if (token == .comment_line or token == .comment_block) {
+            var token = token_;
+            if (token == .comment_line) {
+                token = .eol;
+            } else if (token == .comment_block) {
                 return .{};
             }
 

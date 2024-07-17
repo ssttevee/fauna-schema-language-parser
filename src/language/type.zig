@@ -490,21 +490,38 @@ pub const FQLType = union(enum) {
                 },
                 .object => |*object_state| switch (object_state.state) {
                     .before_key => {
-                        object_state.state = .{
-                            .after_key = switch (token) {
-                                .word => |word| .{
-                                    .identifier = try allocator.dupe(u8, word),
-                                },
-                                .string => |str| .{
-                                    .string = try allocator.dupe(u8, str),
-                                },
-                                .asterisk => .wildcard,
-                                else => {
-                                    std.log.err("unexpected token: expected word, string or asterisk but got {s}", .{@tagName(token)});
-                                    return error.UnexpectedToken;
-                                },
+                        switch (token) {
+                            .word => |word| {
+                                object_state.state = .{
+                                    .after_key = .{
+                                        .identifier = try allocator.dupe(u8, word),
+                                    },
+                                };
                             },
-                        };
+                            .string => |str| {
+                                object_state.state = .{
+                                    .after_key = .{
+                                        .string = try allocator.dupe(u8, str),
+                                    },
+                                };
+                            },
+                            .asterisk => object_state.state = .{
+                                .after_key = .wildcard,
+                            },
+                            .rbrace => {
+                                self.state = .{
+                                    .end = .{
+                                        .object = .{
+                                            .fields = try object_state.fields.toOwnedSlice(allocator),
+                                        },
+                                    },
+                                };
+                            },
+                            else => {
+                                std.log.err("unexpected token: expected word, string or asterisk but got {s}", .{@tagName(token)});
+                                return error.UnexpectedToken;
+                            },
+                        }
                     },
                     .after_key => switch (token) {
                         .colon => {
@@ -521,15 +538,12 @@ pub const FQLType = union(enum) {
                             object_state.state = .before_key;
                         },
                         .rbrace => {
-                            var fields = object_state.fields;
-                            defer fields.deinit(allocator);
-
-                            try fields.append(allocator, field);
+                            try object_state.fields.append(allocator, field);
 
                             self.state = .{
                                 .end = .{
                                     .object = .{
-                                        .fields = try fields.toOwnedSlice(allocator),
+                                        .fields = try object_state.fields.toOwnedSlice(allocator),
                                     },
                                 },
                             };

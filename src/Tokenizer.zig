@@ -402,7 +402,7 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
         }
     }
 
-    if (chars.len >= 3 and chars[0] == '/' and chars[1] == '/') {
+    if (chars.len >= 2 and chars[0] == '/' and chars[1] == '/') {
         const pos = util.slice.indexOfPosFn(chars, 2, isLineTerminator);
         if (pos == null) {
             if (!self.is_eof) {
@@ -461,6 +461,10 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
         if (prefix == .at) {
             self.consumeBytes(chars.len);
             return .{ .annotation = try allocator.dupe(u8, chars) };
+        }
+
+        if (!self.is_eof and chars.len == self.buf_end - self.buf_start) {
+            return error.NeedMoreData;
         }
 
         self.consumeBytes(chars.len);
