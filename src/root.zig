@@ -49,6 +49,14 @@ pub const QueryTree = struct {
         defer it.deinit(allocator);
 
         var exprs = std.ArrayList(FQLExpression).init(allocator);
+        defer {
+            for (exprs.items) |expr| {
+                expr.deinit(allocator);
+            }
+
+            exprs.deinit();
+        }
+
         while (FQLExpression.parse(allocator, &it) catch |err| {
             if (err == error.UnexpectedToken) {
                 std.log.err("at {s}:{d}:{d}", .{ filename, it.tokenizer.current_line + 1, it.tokenizer.current_col + 1 });
@@ -102,6 +110,14 @@ pub const SchemaTree = struct {
         defer it.deinit(allocator);
 
         var decls = std.ArrayList(SchemaDefinition).init(allocator);
+        defer {
+            for (decls.items) |decl| {
+                decl.deinit(allocator);
+            }
+
+            decls.deinit();
+        }
+
         while (SchemaDefinition.parse(allocator, &it) catch |err| {
             if (err == error.UnexpectedToken) {
                 std.log.err("at {s}:{d}:{d}", .{ filename, it.tokenizer.current_line + 1, it.tokenizer.current_col + 1 });

@@ -37,6 +37,13 @@ pub fn main() !void {
 
     const allocator = gpa.allocator();
 
+    const stdout = std.io.getStdOut();
+    defer stdout.close();
+
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+
+    const w = (TeeWriter{ .writers = &.{ stdout.writer().any(), (HashWriter(@TypeOf(hash)){ .context = &hash }).any() } }).writer();
+
     const infile, const filename = blk: {
         var args = std.process.args();
         _ = args.next();
@@ -49,13 +56,6 @@ pub fn main() !void {
         break :blk .{ std.io.getStdIn(), "-" };
     };
     defer infile.close();
-
-    const stdout = std.io.getStdOut();
-    defer stdout.close();
-
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
-
-    const w = (TeeWriter{ .writers = &.{ stdout.writer().any(), (HashWriter(@TypeOf(hash)){ .context = &hash }).any() } }).writer();
 
     var it = fauna.TokenIterator.init(infile.reader().any());
     defer it.deinit(allocator);
@@ -73,8 +73,5 @@ pub fn main() !void {
         try w.writeByte('\n');
     }
 
-    for (hash.finalResult()) |byte| {
-        std.debug.print("{x:0>2}", .{byte});
-    }
-    std.debug.print("\n", .{});
+    std.debug.print("{s}\n", .{std.fmt.bytesToHex(hash.finalResult(), .lower)});
 }
