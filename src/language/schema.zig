@@ -1823,7 +1823,7 @@ pub const SchemaDefinition = union(enum) {
                                         return .{ .save = res.save };
                                     } else {
                                         switch (token) {
-                                            .eol, .semi => {
+                                            .eol, .semi, .rbrace => {
                                                 try migrations.statements.append(allocator, .{
                                                     .split = .{
                                                         .old_name = split.first_expr,
@@ -1832,6 +1832,10 @@ pub const SchemaDefinition = union(enum) {
                                                 });
 
                                                 migrations.state = .start;
+
+                                                if (token == .rbrace) {
+                                                    return .{ .save = .rbrace };
+                                                }
                                             },
                                             .comma => {
                                                 split.parser = .{};
