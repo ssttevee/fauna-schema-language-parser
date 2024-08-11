@@ -513,22 +513,24 @@ pub const TokenIterator = struct {
             return token;
         }
 
-        return self.tokenizer.next(allocator) catch |err| {
-            if (err == error.NeedMoreData) {
-                var buf: [@typeInfo(std.meta.FieldType(Tokenizer, .buf)).Array.len]u8 = undefined;
+        while (true) {
+            return self.tokenizer.next(allocator) catch |err| {
+                if (err == error.NeedMoreData and !self.tokenizer.is_eof) {
+                    var buf: [@typeInfo(std.meta.FieldType(Tokenizer, .buf)).Array.len]u8 = undefined;
 
-                const n = try self.reader.read(buf[0 .. self.tokenizer.buf.len - self.tokenizer.buf_end + self.tokenizer.buf_start]);
-                if (n == 0) {
-                    self.tokenizer.is_eof = true;
-                } else {
-                    _ = self.tokenizer.write(buf[0..n]) catch unreachable;
+                    const n = try self.reader.read(buf[0 .. self.tokenizer.buf.len - self.tokenizer.buf_end + self.tokenizer.buf_start]);
+                    if (n == 0) {
+                        self.tokenizer.is_eof = true;
+                    } else {
+                        _ = self.tokenizer.write(buf[0..n]) catch unreachable;
+                    }
+
+                    continue;
                 }
 
-                return self.tokenizer.next(allocator);
-            }
-
-            return err;
-        };
+                return err;
+            };
+        }
     }
 
     pub fn next(self: *TokenIterator, allocator: std.mem.Allocator) !?Token {
