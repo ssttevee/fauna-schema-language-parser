@@ -13,26 +13,47 @@ pub const FQLType = union(enum) {
                 string: []const u8,
                 wildcard,
 
-                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                pub fn deinit(self: Key, allocator: std.mem.Allocator) void {
                     switch (self) {
                         inline .identifier, .string => |s| allocator.free(s),
                         else => {},
                     }
+                }
+
+                pub fn dupe(self: Key, allocator: std.mem.Allocator) std.mem.Allocator.Error!Key {
+                    return switch (self) {
+                        inline .identifier, .string => |s, tag| @unionInit(
+                            @This(),
+                            @tagName(tag),
+                            try allocator.dupe(u8, s),
+                        ),
+                        else => .wildcard,
+                    };
                 }
             };
 
             key: Key,
             type: FQLType,
 
-            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+            pub fn deinit(self: Field, allocator: std.mem.Allocator) void {
                 self.key.deinit(allocator);
                 self.type.deinit(allocator);
+            }
+
+            pub fn dupe(self: Field, allocator: std.mem.Allocator) std.mem.Allocator.Error!Field {
+                const key = try self.key.dupe(allocator);
+                errdefer key.deinit(allocator);
+
+                return .{
+                    .key = key,
+                    .type = try self.type.dupe(allocator),
+                };
             }
         };
 
         fields: ?[]const Field = null,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: Object, allocator: std.mem.Allocator) void {
             if (self.fields) |fields| {
                 for (fields) |field| {
                     field.deinit(allocator);
@@ -42,7 +63,13 @@ pub const FQLType = union(enum) {
             }
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter) !void {
+        pub fn dupe(self: Object, allocator: std.mem.Allocator) std.mem.Allocator.Error!Object {
+            return .{
+                .fields = try util.slice.deepDupe(allocator, self.fields),
+            };
+        }
+
+        pub fn printCanonical(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
             try writer.writeByte('{');
 
             if (self.fields) |fields| {
@@ -74,14 +101,27 @@ pub const FQLType = union(enum) {
         lhs: *const FQLType,
         rhs: *const FQLType,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: Union, allocator: std.mem.Allocator) void {
             self.lhs.deinit(allocator);
             allocator.destroy(self.lhs);
             self.rhs.deinit(allocator);
             allocator.destroy(self.rhs);
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter) !void {
+        pub fn dupe(self: Union, allocator: std.mem.Allocator) std.mem.Allocator.Error!Union {
+            const lhs = try self.lhs.dupePtr(allocator);
+            errdefer {
+                lhs.deinit(allocator);
+                allocator.destroy(lhs);
+            }
+
+            return .{
+                .lhs = lhs,
+                .rhs = try self.rhs.dupePtr(allocator),
+            };
+        }
+
+        pub fn printCanonical(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
             try self.lhs.printCanonical(writer);
             try writer.writeAll(" | ");
             try self.rhs.printCanonical(writer);
@@ -92,7 +132,7 @@ pub const FQLType = union(enum) {
         name: []const u8,
         parameters: ?[]const FQLType = null,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: Template, allocator: std.mem.Allocator) void {
             if (self.parameters) |parameters| {
                 for (parameters) |parameter| {
                     parameter.deinit(allocator);
@@ -104,7 +144,17 @@ pub const FQLType = union(enum) {
             allocator.free(self.name);
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter) !void {
+        pub fn dupe(self: Template, allocator: std.mem.Allocator) std.mem.Allocator.Error!Template {
+            const name = try allocator.dupe(u8, self.name);
+            errdefer allocator.free(name);
+
+            return .{
+                .name = name,
+                .parameters = try util.slice.deepDupe(allocator, self.parameters),
+            };
+        }
+
+        pub fn printCanonical(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
             try writer.writeAll(self.name);
 
             if (self.parameters) |parameters| {
@@ -127,7 +177,7 @@ pub const FQLType = union(enum) {
         types: ?[]const FQLType = null,
         parens: bool = false,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: Tuple, allocator: std.mem.Allocator) void {
             if (self.types) |types| {
                 for (types) |t| {
                     t.deinit(allocator);
@@ -137,7 +187,14 @@ pub const FQLType = union(enum) {
             }
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter) !void {
+        pub fn dupe(self: Tuple, allocator: std.mem.Allocator) std.mem.Allocator.Error!Tuple {
+            return .{
+                .types = try util.slice.deepDupe(allocator, self.types),
+                .parens = self.parens,
+            };
+        }
+
+        pub fn printCanonical(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
             try writer.writeByte('[');
 
             if (self.types) |types| {
@@ -160,7 +217,7 @@ pub const FQLType = union(enum) {
                 types: ?[]const FQLType = null,
                 variadic: bool = false,
 
-                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                pub fn deinit(self: Long, allocator: std.mem.Allocator) void {
                     if (self.types) |types| {
                         for (types) |t| {
                             t.deinit(allocator);
@@ -169,12 +226,19 @@ pub const FQLType = union(enum) {
                         allocator.free(types);
                     }
                 }
+
+                pub fn dupe(self: Long, allocator: std.mem.Allocator) std.mem.Allocator.Error!Long {
+                    return .{
+                        .types = try util.slice.deepDupe(allocator, self.types),
+                        .variadic = self.variadic,
+                    };
+                }
             };
 
             long: Long,
             short: *const FQLType,
 
-            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+            pub fn deinit(self: Parameters, allocator: std.mem.Allocator) void {
                 switch (self) {
                     .long => |long| long.deinit(allocator),
                     .short => |short| {
@@ -183,18 +247,35 @@ pub const FQLType = union(enum) {
                     },
                 }
             }
+
+            pub fn dupe(self: Parameters, allocator: std.mem.Allocator) std.mem.Allocator.Error!Parameters {
+                return switch (self) {
+                    .long => |long| .{ .long = try long.dupe(allocator) },
+                    .short => |short| .{ .short = try short.dupePtr(allocator) },
+                };
+            }
         };
 
         parameters: Parameters,
         return_type: *const FQLType,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: Function, allocator: std.mem.Allocator) void {
             self.parameters.deinit(allocator);
             self.return_type.deinit(allocator);
             allocator.destroy(self.return_type);
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter) !void {
+        pub fn dupe(self: Function, allocator: std.mem.Allocator) std.mem.Allocator.Error!Function {
+            const parameters = try self.parameters.dupe(allocator);
+            errdefer parameters.deinit(allocator);
+
+            return .{
+                .parameters = parameters,
+                .return_type = try self.return_type.dupePtr(allocator),
+            };
+        }
+
+        pub fn printCanonical(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
             switch (self.parameters) {
                 .long => |long| {
                     try writer.writeByte('(');
@@ -246,7 +327,24 @@ pub const FQLType = union(enum) {
         }
     }
 
-    pub fn printCanonical(self: @This(), writer: std.io.AnyWriter) std.io.AnyWriter.Error!void {
+    pub fn dupe(self: FQLType, allocator: std.mem.Allocator) std.mem.Allocator.Error!FQLType {
+        return switch (self) {
+            inline .named, .string_literal, .number_literal => |name, tag| @unionInit(FQLType, @tagName(tag), try allocator.dupe(u8, name)),
+            inline .object, .@"union", .template, .tuple, .function => |obj, tag| @unionInit(FQLType, @tagName(tag), try obj.dupe(allocator)),
+            inline .optional, .isolated => |optional, tag| @unionInit(FQLType, @tagName(tag), try optional.dupePtr(allocator)),
+        };
+    }
+
+    fn dupePtr(self: *const FQLType, allocator: std.mem.Allocator) !*FQLType {
+        const ptr = try allocator.create(FQLType);
+        errdefer allocator.destroy(ptr);
+
+        ptr.* = try self.dupe(allocator);
+
+        return ptr;
+    }
+
+    pub fn printCanonical(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
         switch (self) {
             inline .named, .string_literal, .number_literal => |str| try writer.writeAll(str),
             .optional => |child| {
@@ -260,6 +358,13 @@ pub const FQLType = union(enum) {
             },
             inline else => |t| try t.printCanonical(writer),
         }
+    }
+
+    pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+        _ = options;
+
+        try self.printCanonical(writer);
     }
 
     pub fn toCanonicalString(self: @This(), allocator: std.mem.Allocator) ![]const u8 {
@@ -743,8 +848,6 @@ pub const FQLType = union(enum) {
 pub const parseType = FQLType.Parser.parseReader;
 
 fn expectParsedTypeEqual(str: []const u8, expected: FQLType) !void {
-    try parsing.checkForLeaks(FQLType.Parser, str);
-
     var stream = std.io.fixedBufferStream(str);
     var actual = (try parseType(testing.allocator, stream.reader().any())).?;
     defer actual.deinit(testing.allocator);
@@ -755,6 +858,11 @@ fn expectParsedTypeEqual(str: []const u8, expected: FQLType) !void {
     defer testing.allocator.free(canonical_string);
 
     try testing.expectEqualStrings(str, canonical_string);
+
+    try parsing.checkForLeaks(FQLType.Parser, str);
+
+    try parsing.testDupe(expected);
+    try parsing.testDupe(actual);
 }
 
 test parseType {

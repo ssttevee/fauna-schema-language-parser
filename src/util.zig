@@ -68,6 +68,33 @@ pub const slice = struct {
     pub inline fn every(elements: anytype, predicate: anytype) bool {
         return indexOfNoneFn(elements, predicate) == null;
     }
+
+    pub fn deepDupe(allocator: std.mem.Allocator, elems: anytype) std.mem.Allocator.Error!@TypeOf(elems) {
+        const orig_elems = blk: {
+            if (@typeInfo(@TypeOf(elems)) == .Optional) {
+                break :blk elems orelse return null;
+            } else {
+                break :blk elems;
+            }
+        };
+
+        var i: usize = 0;
+        const new_elems = try allocator.alloc(@TypeOf(orig_elems[0]), orig_elems.len);
+        errdefer {
+            for (new_elems[0..i]) |elem| {
+                elem.deinit(allocator);
+            }
+
+            allocator.free(new_elems);
+        }
+
+        for (orig_elems) |orig_elem| {
+            new_elems[i] = try orig_elem.dupe(allocator);
+            i += 1;
+        }
+
+        return new_elems;
+    }
 };
 
 pub fn predicateNegation(comptime predicate: anytype) @TypeOf(predicate) {

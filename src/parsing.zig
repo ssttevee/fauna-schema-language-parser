@@ -113,3 +113,15 @@ pub fn checkForLeaks(comptime P: type, str: []const u8) !void {
         return error.TestLeaked;
     }
 }
+
+pub fn testDupe(value: anytype) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){ .backing_allocator = testing.allocator };
+    const allocator = gpa.allocator();
+
+    const duped = try value.dupe(allocator);
+    duped.deinit(allocator);
+
+    if (gpa.deinit() == .leak) {
+        return error.TestLeaked;
+    }
+}

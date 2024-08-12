@@ -27,7 +27,7 @@ pub const QueryTree = struct {
 
     expressions: ?[]FQLExpression = null,
 
-    pub fn deinit(self: @This()) void {
+    pub fn deinit(self: QueryTree) void {
         if (self.expressions) |expressions| {
             for (expressions) |expr| {
                 expr.deinit(self.allocator);
@@ -35,6 +35,13 @@ pub const QueryTree = struct {
 
             self.allocator.free(expressions);
         }
+    }
+
+    pub fn dupe(self: QueryTree, allocator: std.mem.Allocator) !QueryTree {
+        return .{
+            .allocator = allocator,
+            .expressions = try util.slice.deepDupe(allocator, self.expressions),
+        };
     }
 
     pub fn parseFile(allocator: std.mem.Allocator, filename: []const u8) !SchemaTree {
@@ -88,7 +95,7 @@ pub const SchemaTree = struct {
 
     declarations: ?[]SchemaDefinition = null,
 
-    pub fn deinit(self: @This()) void {
+    pub fn deinit(self: SchemaTree) void {
         if (self.declarations) |declarations| {
             for (declarations) |declaration| {
                 declaration.deinit(self.allocator);
@@ -96,6 +103,13 @@ pub const SchemaTree = struct {
 
             self.allocator.free(declarations);
         }
+    }
+
+    pub fn dupe(self: SchemaTree, allocator: std.mem.Allocator) !SchemaTree {
+        return .{
+            .allocator = allocator,
+            .declarations = try util.slice.deepDupe(allocator, self.declarations),
+        };
     }
 
     pub fn parseFile(allocator: std.mem.Allocator, filename: []const u8) !SchemaTree {

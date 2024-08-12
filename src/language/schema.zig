@@ -15,14 +15,30 @@ pub const SchemaDefinition = union(enum) {
                 name: []const u8,
                 predicate: ?FQLExpression = null,
 
-                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                pub fn deinit(self: Member.Role, allocator: std.mem.Allocator) void {
                     allocator.free(self.name);
                     if (self.predicate) |predicate| {
                         predicate.deinit(allocator);
                     }
                 }
 
-                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                pub fn dupe(self: Member.Role, allocator: std.mem.Allocator) std.mem.Allocator.Error!Member.Role {
+                    var predicate: ?FQLExpression = null;
+                    if (self.predicate) |expr| {
+                        predicate = try expr.dupe(allocator);
+                    }
+
+                    errdefer if (predicate) |expr| {
+                        expr.deinit(allocator);
+                    };
+
+                    return .{
+                        .name = try allocator.dupe(u8, self.name),
+                        .predicate = predicate,
+                    };
+                }
+
+                pub fn printCanonical(self: Member.Role, writer: std.io.AnyWriter, indent_str: []const u8) !void {
                     try writer.writeAll("role ");
                     try writer.writeAll(self.name);
                     if (self.predicate) |predicate| {
@@ -42,7 +58,7 @@ pub const SchemaDefinition = union(enum) {
             role: Member.Role,
             ttl: []const u8,
 
-            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+            pub fn deinit(self: Member, allocator: std.mem.Allocator) void {
                 switch (self) {
                     inline .issuer,
                     .jwks_uri,
@@ -52,7 +68,17 @@ pub const SchemaDefinition = union(enum) {
                 }
             }
 
-            pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+            pub fn dupe(self: Member, allocator: std.mem.Allocator) std.mem.Allocator.Error!Member {
+                return switch (self) {
+                    inline .issuer,
+                    .jwks_uri,
+                    .ttl,
+                    => |s, tag| @unionInit(Member, @tagName(tag), try allocator.dupe(u8, s)),
+                    .role => .{ .role = try self.role.dupe(allocator) },
+                };
+            }
+
+            pub fn printCanonical(self: Member, writer: std.io.AnyWriter, indent_str: []const u8) !void {
                 switch (self) {
                     .role => |role| try role.printCanonical(writer, indent_str),
                     inline else => |member, tag| {
@@ -67,7 +93,7 @@ pub const SchemaDefinition = union(enum) {
         name: []const u8,
         members: ?[]const Member = null,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: AccessProvider, allocator: std.mem.Allocator) void {
             if (self.members) |members| {
                 for (members) |member| {
                     member.deinit(allocator);
@@ -79,7 +105,17 @@ pub const SchemaDefinition = union(enum) {
             allocator.free(self.name);
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+        pub fn dupe(self: AccessProvider, allocator: std.mem.Allocator) std.mem.Allocator.Error!AccessProvider {
+            const name = try allocator.dupe(u8, self.name);
+            errdefer allocator.free(name);
+
+            return .{
+                .name = name,
+                .members = try util.slice.deepDupe(allocator, self.members),
+            };
+        }
+
+        pub fn printCanonical(self: AccessProvider, writer: std.io.AnyWriter, indent_str: []const u8) !void {
             try writer.writeAll("access provider ");
             try writer.writeAll(self.name);
             try writer.writeAll(" {\n");
@@ -103,7 +139,7 @@ pub const SchemaDefinition = union(enum) {
                 type: FQLType,
                 default: ?FQLExpression = null,
 
-                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                pub fn deinit(self: Field, allocator: std.mem.Allocator) void {
                     if (self.default) |default| {
                         default.deinit(allocator);
                     }
@@ -112,7 +148,27 @@ pub const SchemaDefinition = union(enum) {
                     allocator.free(self.name);
                 }
 
-                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                pub fn dupe(self: Field, allocator: std.mem.Allocator) std.mem.Allocator.Error!Field {
+                    var default: ?FQLExpression = null;
+                    if (self.default) |expr| {
+                        default = try expr.dupe(allocator);
+                    }
+
+                    errdefer if (default) |expr| {
+                        expr.deinit(allocator);
+                    };
+
+                    const name = try allocator.dupe(u8, self.name);
+                    errdefer allocator.free(name);
+
+                    return .{
+                        .name = name,
+                        .type = try self.type.dupe(allocator),
+                        .default = default,
+                    };
+                }
+
+                pub fn printCanonical(self: Field, writer: std.io.AnyWriter, indent_str: []const u8) !void {
                     try writer.writeAll(self.name);
                     try writer.writeAll(": ");
                     try self.type.printCanonical(writer);
@@ -127,7 +183,7 @@ pub const SchemaDefinition = union(enum) {
                     terms: []const FQLExpression,
                     values: []const FQLExpression,
 
-                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                    pub fn deinit(self: Index.Member, allocator: std.mem.Allocator) void {
                         switch (self) {
                             inline .terms,
                             .values,
@@ -141,7 +197,17 @@ pub const SchemaDefinition = union(enum) {
                         }
                     }
 
-                    pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                    pub fn dupe(self: Index.Member, allocator: std.mem.Allocator) std.mem.Allocator.Error!Index.Member {
+                        return switch (self) {
+                            inline else => |exprs, tag| @unionInit(
+                                Index.Member,
+                                @tagName(tag),
+                                try util.slice.deepDupe(allocator, exprs),
+                            ),
+                        };
+                    }
+
+                    pub fn printCanonical(self: Index.Member, writer: std.io.AnyWriter, indent_str: []const u8) !void {
                         try writer.writeAll(@tagName(self));
                         try writer.writeAll(" [");
                         switch (self) {
@@ -160,9 +226,9 @@ pub const SchemaDefinition = union(enum) {
                 };
 
                 name: []const u8,
-                members: ?[]const @This().Member = null,
+                members: ?[]const Index.Member = null,
 
-                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                pub fn deinit(self: Index, allocator: std.mem.Allocator) void {
                     if (self.members) |members| {
                         for (members) |member| {
                             member.deinit(allocator);
@@ -174,7 +240,17 @@ pub const SchemaDefinition = union(enum) {
                     allocator.free(self.name);
                 }
 
-                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                pub fn dupe(self: Index, allocator: std.mem.Allocator) std.mem.Allocator.Error!Index {
+                    const name = try allocator.dupe(u8, self.name);
+                    errdefer allocator.free(name);
+
+                    return .{
+                        .name = name,
+                        .members = try util.slice.deepDupe(allocator, self.members),
+                    };
+                }
+
+                pub fn printCanonical(self: Index, writer: std.io.AnyWriter, indent_str: []const u8) !void {
                     try writer.writeAll("index ");
                     try writer.writeAll(self.name);
                     try writer.writeAll(" {\n");
@@ -196,12 +272,22 @@ pub const SchemaDefinition = union(enum) {
                     name: FQLExpression,
                     value: FQLExpression,
 
-                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                    pub fn deinit(self: Backfill, allocator: std.mem.Allocator) void {
                         self.name.deinit(allocator);
                         self.value.deinit(allocator);
                     }
 
-                    pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                    pub fn dupe(self: Backfill, allocator: std.mem.Allocator) std.mem.Allocator.Error!Backfill {
+                        const name = try self.name.dupe(allocator);
+                        errdefer name.deinit(allocator);
+
+                        return .{
+                            .name = name,
+                            .value = try self.value.dupe(allocator),
+                        };
+                    }
+
+                    pub fn printCanonical(self: Backfill, writer: std.io.AnyWriter, indent_str: []const u8) !void {
                         try self.name.printCanonical(writer, indent_str, 2);
                         try writer.writeAll(" = ");
                         try self.value.printCanonical(writer, indent_str, 2);
@@ -212,12 +298,22 @@ pub const SchemaDefinition = union(enum) {
                     old_name: FQLExpression,
                     new_name: FQLExpression,
 
-                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                    pub fn deinit(self: Move, allocator: std.mem.Allocator) void {
                         self.old_name.deinit(allocator);
                         self.new_name.deinit(allocator);
                     }
 
-                    pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                    pub fn dupe(self: Move, allocator: std.mem.Allocator) std.mem.Allocator.Error!Move {
+                        const old_name = try self.old_name.dupe(allocator);
+                        errdefer old_name.deinit(allocator);
+
+                        return .{
+                            .old_name = old_name,
+                            .new_name = try self.new_name.dupe(allocator),
+                        };
+                    }
+
+                    pub fn printCanonical(self: Move, writer: std.io.AnyWriter, indent_str: []const u8) !void {
                         try self.old_name.printCanonical(writer, indent_str, 2);
                         try writer.writeAll(" -> ");
                         try self.new_name.printCanonical(writer, indent_str, 2);
@@ -228,7 +324,7 @@ pub const SchemaDefinition = union(enum) {
                     old_name: FQLExpression,
                     new_names: []const FQLExpression,
 
-                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                    pub fn deinit(self: Split, allocator: std.mem.Allocator) void {
                         for (self.new_names) |new_name| {
                             new_name.deinit(allocator);
                         }
@@ -237,7 +333,17 @@ pub const SchemaDefinition = union(enum) {
                         self.old_name.deinit(allocator);
                     }
 
-                    pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                    pub fn dupe(self: Split, allocator: std.mem.Allocator) std.mem.Allocator.Error!Split {
+                        const old_name = try self.old_name.dupe(allocator);
+                        errdefer old_name.deinit(allocator);
+
+                        return .{
+                            .old_name = old_name,
+                            .new_names = try util.slice.deepDupe(allocator, self.new_names),
+                        };
+                    }
+
+                    pub fn printCanonical(self: Split, writer: std.io.AnyWriter, indent_str: []const u8) !void {
                         try self.old_name.printCanonical(writer, indent_str, 2);
                         try writer.writeAll(" -> ");
                         for (self.new_names, 0..) |new_name, i| {
@@ -258,13 +364,23 @@ pub const SchemaDefinition = union(enum) {
                 move_wildcard: FQLExpression,
                 split: Split,
 
-                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                pub fn deinit(self: Migration, allocator: std.mem.Allocator) void {
                     switch (self) {
                         inline else => |e| e.deinit(allocator),
                     }
                 }
 
-                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                pub fn dupe(self: Migration, allocator: std.mem.Allocator) std.mem.Allocator.Error!Migration {
+                    return switch (self) {
+                        inline else => |m, tag| @unionInit(
+                            Migration,
+                            @tagName(tag),
+                            try m.dupe(allocator),
+                        ),
+                    };
+                }
+
+                pub fn printCanonical(self: Migration, writer: std.io.AnyWriter, indent_str: []const u8) !void {
                     try writer.writeAll(@tagName(self));
                     try writer.writeByte(' ');
                     switch (self) {
@@ -277,7 +393,7 @@ pub const SchemaDefinition = union(enum) {
             pub const UniqueConstraint = struct {
                 terms: ?[]const FQLExpression = null,
 
-                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                pub fn deinit(self: UniqueConstraint, allocator: std.mem.Allocator) void {
                     if (self.terms) |terms| {
                         for (terms) |term| {
                             term.deinit(allocator);
@@ -287,7 +403,13 @@ pub const SchemaDefinition = union(enum) {
                     }
                 }
 
-                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                pub fn dupe(self: UniqueConstraint, allocator: std.mem.Allocator) std.mem.Allocator.Error!UniqueConstraint {
+                    return .{
+                        .terms = try util.slice.deepDupe(allocator, self.terms),
+                    };
+                }
+
+                pub fn printCanonical(self: UniqueConstraint, writer: std.io.AnyWriter, indent_str: []const u8) !void {
                     try writer.writeAll("unique [");
                     if (self.terms) |terms| {
                         for (terms, 0..) |term, i| {
@@ -307,12 +429,22 @@ pub const SchemaDefinition = union(enum) {
                 name: []const u8,
                 predicate: FQLExpression,
 
-                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                pub fn deinit(self: CheckConstraint, allocator: std.mem.Allocator) void {
                     self.predicate.deinit(allocator);
                     allocator.free(self.name);
                 }
 
-                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                pub fn dupe(self: CheckConstraint, allocator: std.mem.Allocator) std.mem.Allocator.Error!CheckConstraint {
+                    const name = try allocator.dupe(u8, self.name);
+                    errdefer allocator.free(name);
+
+                    return .{
+                        .name = name,
+                        .predicate = try self.predicate.dupe(allocator),
+                    };
+                }
+
+                pub fn printCanonical(self: CheckConstraint, writer: std.io.AnyWriter, indent_str: []const u8) !void {
                     try writer.writeAll("check ");
                     try writer.writeAll(self.name);
                     try writer.writeAll(" ");
@@ -325,7 +457,7 @@ pub const SchemaDefinition = union(enum) {
                 type: ?FQLType,
                 function: FQLExpression,
 
-                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                pub fn deinit(self: ComputedField, allocator: std.mem.Allocator) void {
                     if (self.type) |t| {
                         t.deinit(allocator);
                     }
@@ -334,7 +466,27 @@ pub const SchemaDefinition = union(enum) {
                     allocator.free(self.name);
                 }
 
-                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                pub fn dupe(self: ComputedField, allocator: std.mem.Allocator) std.mem.Allocator.Error!ComputedField {
+                    const name = try allocator.dupe(u8, self.name);
+                    errdefer allocator.free(name);
+
+                    var fql_type: ?FQLType = null;
+                    if (self.type) |t| {
+                        fql_type = try t.dupe(allocator);
+                    }
+
+                    errdefer if (fql_type) |t| {
+                        t.deinit(allocator);
+                    };
+
+                    return .{
+                        .name = name,
+                        .type = fql_type,
+                        .function = try self.function.dupe(allocator),
+                    };
+                }
+
+                pub fn printCanonical(self: ComputedField, writer: std.io.AnyWriter, indent_str: []const u8) !void {
                     try writer.writeAll("compute ");
                     try writer.writeAll(self.name);
                     if (self.type) |fql_type| {
@@ -356,7 +508,7 @@ pub const SchemaDefinition = union(enum) {
             check_constraint: CheckConstraint,
             computed_field: ComputedField,
 
-            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+            pub fn deinit(self: Member, allocator: std.mem.Allocator) void {
                 switch (self) {
                     inline .field,
                     .index,
@@ -376,7 +528,21 @@ pub const SchemaDefinition = union(enum) {
                 }
             }
 
-            pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+            pub fn dupe(self: Member, allocator: std.mem.Allocator) std.mem.Allocator.Error!Member {
+                return switch (self) {
+                    inline .field,
+                    .index,
+                    .unique_constraint,
+                    .check_constraint,
+                    .computed_field,
+                    => |v, tag| @unionInit(Member, @tagName(tag), try v.dupe(allocator)),
+                    .migrations => .{ .migrations = try util.slice.deepDupe(allocator, self.migrations) },
+                    inline .history_days, .ttl_days => |s, tag| @unionInit(Member, @tagName(tag), try allocator.dupe(u8, s)),
+                    inline else => |v, tag| @unionInit(Member, @tagName(tag), v),
+                };
+            }
+
+            pub fn printCanonical(self: Member, writer: std.io.AnyWriter, indent_str: []const u8) !void {
                 switch (self) {
                     inline .field, .index, .unique_constraint, .check_constraint, .computed_field => |prop| try prop.printCanonical(writer, indent_str),
                     inline .history_days, .ttl_days => |s, tag| {
@@ -404,7 +570,7 @@ pub const SchemaDefinition = union(enum) {
         name: []const u8,
         members: ?[]const Member = null,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: Collection, allocator: std.mem.Allocator) void {
             if (self.alias) |alias| {
                 alias.deinit(allocator);
             }
@@ -420,7 +586,23 @@ pub const SchemaDefinition = union(enum) {
             allocator.free(self.name);
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+        pub fn dupe(self: Collection, allocator: std.mem.Allocator) std.mem.Allocator.Error!Collection {
+            const alias: ?FQLExpression = if (self.alias) |expr| try expr.dupe(allocator) else null;
+            errdefer if (alias) |expr| {
+                expr.deinit(allocator);
+            };
+
+            const name = try allocator.dupe(u8, self.name);
+            errdefer allocator.free(name);
+
+            return .{
+                .alias = alias,
+                .name = name,
+                .members = try util.slice.deepDupe(allocator, self.members),
+            };
+        }
+
+        pub fn printCanonical(self: Collection, writer: std.io.AnyWriter, indent_str: []const u8) !void {
             if (self.alias) |alias| {
                 try writer.writeAll("@alias(");
                 try alias.printCanonical(writer, indent_str, 1);
@@ -449,7 +631,7 @@ pub const SchemaDefinition = union(enum) {
                 collection: []const u8,
                 predicate: ?FQLExpression = null,
 
-                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                pub fn deinit(self: Membership, allocator: std.mem.Allocator) void {
                     if (self.predicate) |predicate| {
                         predicate.deinit(allocator);
                     }
@@ -457,7 +639,23 @@ pub const SchemaDefinition = union(enum) {
                     allocator.free(self.collection);
                 }
 
-                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                pub fn dupe(self: Membership, allocator: std.mem.Allocator) std.mem.Allocator.Error!Membership {
+                    var predicate: ?FQLExpression = null;
+                    if (self.predicate) |expr| {
+                        predicate = try expr.dupe(allocator);
+                    }
+
+                    errdefer if (predicate) |expr| {
+                        expr.deinit(allocator);
+                    };
+
+                    return .{
+                        .collection = try allocator.dupe(u8, self.collection),
+                        .predicate = predicate,
+                    };
+                }
+
+                pub fn printCanonical(self: Membership, writer: std.io.AnyWriter, indent_str: []const u8) !void {
                     try writer.writeAll(self.collection);
 
                     if (self.predicate) |predicate| {
@@ -487,10 +685,17 @@ pub const SchemaDefinition = union(enum) {
                     action: @This().Action,
                     predicate: ?FQLExpression = null,
 
-                    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
                         if (self.predicate) |predicate| {
                             predicate.deinit(allocator);
                         }
+                    }
+
+                    pub fn dupe(self: @This(), allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
+                        return .{
+                            .action = self.action,
+                            .predicate = if (self.predicate) |expr| try expr.dupe(allocator) else null,
+                        };
                     }
 
                     pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
@@ -510,7 +715,7 @@ pub const SchemaDefinition = union(enum) {
                 resource: []const u8,
                 actions: ?[]const Action = null,
 
-                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                pub fn deinit(self: Privileges, allocator: std.mem.Allocator) void {
                     if (self.actions) |actions| {
                         for (actions) |action| {
                             action.deinit(allocator);
@@ -522,7 +727,17 @@ pub const SchemaDefinition = union(enum) {
                     allocator.free(self.resource);
                 }
 
-                pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+                pub fn dupe(self: Privileges, allocator: std.mem.Allocator) std.mem.Allocator.Error!Privileges {
+                    const resource = try allocator.dupe(u8, self.resource);
+                    errdefer allocator.free(resource);
+
+                    return .{
+                        .resource = resource,
+                        .actions = try util.slice.deepDupe(allocator, self.actions),
+                    };
+                }
+
+                pub fn printCanonical(self: Privileges, writer: std.io.AnyWriter, indent_str: []const u8) !void {
                     try writer.writeAll(self.resource);
                     try writer.writeAll(" {\n");
 
@@ -542,13 +757,19 @@ pub const SchemaDefinition = union(enum) {
             membership: Membership,
             privileges: Privileges,
 
-            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+            pub fn deinit(self: Member, allocator: std.mem.Allocator) void {
                 switch (self) {
                     inline else => |d| d.deinit(allocator),
                 }
             }
 
-            pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+            pub fn dupe(self: Member, allocator: std.mem.Allocator) std.mem.Allocator.Error!Member {
+                return switch (self) {
+                    inline else => |m, tag| @unionInit(Member, @tagName(tag), try m.dupe(allocator)),
+                };
+            }
+
+            pub fn printCanonical(self: Member, writer: std.io.AnyWriter, indent_str: []const u8) !void {
                 try writer.writeAll(@tagName(self));
                 try writer.writeByte(' ');
 
@@ -561,7 +782,7 @@ pub const SchemaDefinition = union(enum) {
         name: []const u8,
         members: ?[]const Member = null,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: Role, allocator: std.mem.Allocator) void {
             if (self.members) |members| {
                 for (members) |member| {
                     member.deinit(allocator);
@@ -573,7 +794,17 @@ pub const SchemaDefinition = union(enum) {
             allocator.free(self.name);
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+        pub fn dupe(self: Role, allocator: std.mem.Allocator) std.mem.Allocator.Error!Role {
+            const name = try allocator.dupe(u8, self.name);
+            errdefer allocator.free(name);
+
+            return .{
+                .name = name,
+                .members = try util.slice.deepDupe(allocator, self.members),
+            };
+        }
+
+        pub fn printCanonical(self: Role, writer: std.io.AnyWriter, indent_str: []const u8) !void {
             try writer.writeAll("role ");
             try writer.writeAll(self.name);
             try writer.writeAll(" {\n");
@@ -595,12 +826,22 @@ pub const SchemaDefinition = union(enum) {
             name: []const u8,
             type: ?FQLType = null,
 
-            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+            pub fn deinit(self: Parameter, allocator: std.mem.Allocator) void {
                 if (self.type) |t| {
                     t.deinit(allocator);
                 }
 
                 allocator.free(self.name);
+            }
+
+            pub fn dupe(self: Parameter, allocator: std.mem.Allocator) std.mem.Allocator.Error!Parameter {
+                const name = try allocator.dupe(u8, self.name);
+                errdefer allocator.free(name);
+
+                return .{
+                    .name = name,
+                    .type = if (self.type) |t| try t.dupe(allocator) else null,
+                };
             }
         };
 
@@ -612,7 +853,7 @@ pub const SchemaDefinition = union(enum) {
         return_type: ?FQLType = null,
         body: ?[]const FQLExpression = null,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: Function, allocator: std.mem.Allocator) void {
             if (self.role) |expr| {
                 expr.deinit(allocator);
             }
@@ -644,7 +885,45 @@ pub const SchemaDefinition = union(enum) {
             allocator.free(self.name);
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
+        pub fn dupe(self: Function, allocator: std.mem.Allocator) std.mem.Allocator.Error!Function {
+            const alias: ?FQLExpression = if (self.alias) |expr| try expr.dupe(allocator) else null;
+            errdefer if (alias) |expr| {
+                expr.deinit(allocator);
+            };
+
+            const role: ?FQLExpression = if (self.role) |expr| try expr.dupe(allocator) else null;
+            errdefer if (role) |expr| {
+                expr.deinit(allocator);
+            };
+
+            const name = try allocator.dupe(u8, self.name);
+            errdefer allocator.free(name);
+
+            const parameters = try util.slice.deepDupe(allocator, self.parameters);
+            errdefer if (parameters) |params| {
+                for (params) |param| {
+                    param.deinit(allocator);
+                }
+
+                allocator.free(params);
+            };
+
+            const return_type: ?FQLType = if (self.return_type) |fql_type| try fql_type.dupe(allocator) else null;
+            errdefer if (return_type) |fql_type| {
+                fql_type.deinit(allocator);
+            };
+
+            return .{
+                .alias = alias,
+                .role = role,
+                .name = name,
+                .parameters = parameters,
+                .return_type = return_type,
+                .body = try util.slice.deepDupe(allocator, self.body),
+            };
+        }
+
+        pub fn printCanonical(self: Function, writer: std.io.AnyWriter, indent_str: []const u8) !void {
             if (self.alias) |alias| {
                 try writer.writeAll("@alias(");
                 try alias.printCanonical(writer, indent_str, 1);
@@ -744,6 +1023,12 @@ pub const SchemaDefinition = union(enum) {
         switch (self) {
             inline else => |d| d.deinit(allocator),
         }
+    }
+
+    pub fn dupe(self: SchemaDefinition, allocator: std.mem.Allocator) std.mem.Allocator.Error!SchemaDefinition {
+        return switch (self) {
+            inline else => |d, tag| @unionInit(SchemaDefinition, @tagName(tag), try d.dupe(allocator)),
+        };
     }
 
     pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8) !void {
@@ -2586,8 +2871,6 @@ pub const SchemaDefinition = union(enum) {
 pub const parseDefinition = SchemaDefinition.Parser.parseReader;
 
 fn expectParsedDefnEqual(str: []const u8, expected: SchemaDefinition) !void {
-    try parsing.checkForLeaks(SchemaDefinition.Parser, str);
-
     var stream = std.io.fixedBufferStream(str);
     var actual = (try parseDefinition(testing.allocator, stream.reader().any())).?;
     defer actual.deinit(testing.allocator);
@@ -2595,6 +2878,11 @@ fn expectParsedDefnEqual(str: []const u8, expected: SchemaDefinition) !void {
     // std.debug.print("actual: {any}\n", .{actual});
 
     try testing.expectEqualDeep(expected, actual);
+
+    try parsing.checkForLeaks(SchemaDefinition.Parser, str);
+
+    try parsing.testDupe(expected);
+    try parsing.testDupe(actual);
 }
 
 test parseDefinition {

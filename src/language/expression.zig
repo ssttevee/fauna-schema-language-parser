@@ -14,30 +14,46 @@ pub const FQLExpression = union(enum) {
                 identifier: []const u8,
                 string: []const u8,
 
-                fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+                pub fn deinit(self: Key, allocator: std.mem.Allocator) void {
                     switch (self) {
                         inline else => |s| allocator.free(s),
                     }
+                }
+
+                pub fn dupe(self: Key, allocator: std.mem.Allocator) std.mem.Allocator.Error!Key {
+                    return switch (self) {
+                        inline else => |k, tag| @unionInit(Key, @tagName(tag), try allocator.dupe(u8, k)),
+                    };
                 }
             };
 
             key: Key,
             value: *const FQLExpression,
 
-            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+            pub fn deinit(self: Field, allocator: std.mem.Allocator) void {
                 self.key.deinit(allocator);
                 self.value.deinit(allocator);
                 allocator.destroy(self.value);
             }
 
-            fn multilineCanonical(self: @This()) bool {
+            pub fn dupe(self: Field, allocator: std.mem.Allocator) std.mem.Allocator.Error!Field {
+                const key = try self.key.dupe(allocator);
+                errdefer key.deinit(allocator);
+
+                return .{
+                    .key = key,
+                    .value = try self.value.dupePtr(allocator),
+                };
+            }
+
+            fn multilineCanonical(self: Field) bool {
                 return self.value.multilineCanonical();
             }
         };
 
         fields: ?[]const Field = null,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: ObjectLiteral, allocator: std.mem.Allocator) void {
             if (self.fields) |fields| {
                 for (fields) |field| {
                     field.deinit(allocator);
@@ -47,11 +63,15 @@ pub const FQLExpression = union(enum) {
             }
         }
 
-        fn multilineCanonical(self: @This()) bool {
+        pub fn dupe(self: ObjectLiteral, allocator: std.mem.Allocator) std.mem.Allocator.Error!ObjectLiteral {
+            return .{ .fields = try util.slice.deepDupe(allocator, self.fields) };
+        }
+
+        fn multilineCanonical(self: ObjectLiteral) bool {
             return self.fields != null and util.slice.some(self.fields.?, Field.multilineCanonical);
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+        pub fn printCanonical(self: ObjectLiteral, writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
             try writer.writeByte('{');
 
             if (self.fields) |fields| {
@@ -99,7 +119,7 @@ pub const FQLExpression = union(enum) {
         elements: ?[]const FQLExpression = null,
         parens: bool = false,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: ArrayLiteral, allocator: std.mem.Allocator) void {
             if (self.elements) |elems| {
                 for (elems) |elem| {
                     elem.deinit(allocator);
@@ -109,11 +129,18 @@ pub const FQLExpression = union(enum) {
             }
         }
 
-        fn multilineCanonical(self: @This()) bool {
+        pub fn dupe(self: ArrayLiteral, allocator: std.mem.Allocator) std.mem.Allocator.Error!ArrayLiteral {
+            return .{
+                .elements = try util.slice.deepDupe(allocator, self.elements),
+                .parens = self.parens,
+            };
+        }
+
+        fn multilineCanonical(self: ArrayLiteral) bool {
             return self.elements != null and util.slice.some(self.elements.?, FQLExpression.multilineCanonical);
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+        pub fn printCanonical(self: ArrayLiteral, writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
             try writer.writeByte(if (self.parens) '(' else '[');
             if (self.elements) |elems| {
                 if (elems.len > 0) {
@@ -238,18 +265,32 @@ pub const FQLExpression = union(enum) {
         lhs: *const FQLExpression,
         rhs: *const FQLExpression,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: BinaryOperation, allocator: std.mem.Allocator) void {
             self.lhs.deinit(allocator);
             self.rhs.deinit(allocator);
             allocator.destroy(self.lhs);
             allocator.destroy(self.rhs);
         }
 
-        fn multilineCanonical(self: @This()) bool {
+        pub fn dupe(self: BinaryOperation, allocator: std.mem.Allocator) std.mem.Allocator.Error!BinaryOperation {
+            const lhs = try self.lhs.dupePtr(allocator);
+            errdefer {
+                lhs.deinit(allocator);
+                allocator.destroy(lhs);
+            }
+
+            return .{
+                .operator = self.operator,
+                .lhs = lhs,
+                .rhs = try self.rhs.dupePtr(allocator),
+            };
+        }
+
+        fn multilineCanonical(self: BinaryOperation) bool {
             return self.lhs.multilineCanonical() or self.rhs.multilineCanonical();
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+        pub fn printCanonical(self: BinaryOperation, writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
             try self.lhs.printCanonical(writer, indent_str, level);
             try writer.writeByte(' ');
             try writer.writeAll(self.operator.toString());
@@ -276,16 +317,23 @@ pub const FQLExpression = union(enum) {
         operator: Operator,
         operand: *const FQLExpression,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        fn deinit(self: UnaryOperation, allocator: std.mem.Allocator) void {
             self.operand.deinit(allocator);
             allocator.destroy(self.operand);
         }
 
-        fn multilineCanonical(self: @This()) bool {
+        pub fn dupe(self: UnaryOperation, allocator: std.mem.Allocator) std.mem.Allocator.Error!UnaryOperation {
+            return .{
+                .operator = self.operator,
+                .operand = try self.operand.dupePtr(allocator),
+            };
+        }
+
+        fn multilineCanonical(self: UnaryOperation) bool {
             return self.operand.multilineCanonical();
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+        pub fn printCanonical(self: UnaryOperation, writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
             try writer.writeAll(self.operator.toString());
             try self.operand.printCanonical(writer, indent_str, level);
         }
@@ -295,7 +343,7 @@ pub const FQLExpression = union(enum) {
         identifier: []const u8,
         expression: *const FQLExpression,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: FieldAccessKey, allocator: std.mem.Allocator) void {
             switch (self) {
                 .identifier => |identifier| allocator.free(identifier),
                 .expression => |expression| {
@@ -304,6 +352,13 @@ pub const FQLExpression = union(enum) {
                 },
             }
         }
+
+        pub fn dupe(self: FieldAccessKey, allocator: std.mem.Allocator) std.mem.Allocator.Error!FieldAccessKey {
+            return switch (self) {
+                .identifier => |ident| .{ .identifier = try allocator.dupe(u8, ident) },
+                .expression => |expr| .{ .expression = try expr.dupePtr(allocator) },
+            };
+        }
     };
 
     pub const FieldAccess = struct {
@@ -311,17 +366,28 @@ pub const FQLExpression = union(enum) {
         field: FieldAccessKey,
         optional: bool = false,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: FieldAccess, allocator: std.mem.Allocator) void {
             self.value.deinit(allocator);
             self.field.deinit(allocator);
             allocator.destroy(self.value);
         }
 
-        fn multilineCanonical(self: @This()) bool {
+        pub fn dupe(self: FieldAccess, allocator: std.mem.Allocator) std.mem.Allocator.Error!FieldAccess {
+            const field = try self.field.dupe(allocator);
+            errdefer field.deinit(allocator);
+
+            return .{
+                .value = try self.value.dupePtr(allocator),
+                .field = field,
+                .optional = self.optional,
+            };
+        }
+
+        fn multilineCanonical(self: FieldAccess) bool {
             return self.value.multilineCanonical() or (self.field == .expression and self.field.expression.multilineCanonical());
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+        pub fn printCanonical(self: FieldAccess, writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
             try self.value.printCanonical(writer, indent_str, level);
             if (self.optional) {
                 try writer.writeByte('?');
@@ -357,7 +423,7 @@ pub const FQLExpression = union(enum) {
         function: *const FQLExpression,
         arguments: ?[]const FQLExpression = null,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: Invocation, allocator: std.mem.Allocator) void {
             if (self.arguments) |arguments| {
                 for (arguments) |argument| {
                     argument.deinit(allocator);
@@ -370,11 +436,24 @@ pub const FQLExpression = union(enum) {
             allocator.destroy(self.function);
         }
 
-        fn multilineCanonical(self: @This()) bool {
+        pub fn dupe(self: Invocation, allocator: std.mem.Allocator) std.mem.Allocator.Error!Invocation {
+            const function = try self.function.dupePtr(allocator);
+            errdefer {
+                function.deinit(allocator);
+                allocator.destroy(function);
+            }
+
+            return .{
+                .function = function,
+                .arguments = try util.slice.deepDupe(allocator, self.arguments),
+            };
+        }
+
+        fn multilineCanonical(self: Invocation) bool {
             return self.function.multilineCanonical() or (self.arguments != null and util.slice.some(self.arguments.?, FQLExpression.multilineCanonical));
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+        pub fn printCanonical(self: Invocation, writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
             try self.function.printCanonical(writer, indent_str, level);
             try writer.writeByte('(');
             if (self.arguments) |args| {
@@ -411,7 +490,7 @@ pub const FQLExpression = union(enum) {
         type: ?FQLType = null,
         value: *const FQLExpression,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: VariableDeclaration, allocator: std.mem.Allocator) void {
             if (self.type) |fql_type| {
                 fql_type.deinit(allocator);
             }
@@ -421,11 +500,31 @@ pub const FQLExpression = union(enum) {
             allocator.destroy(self.value);
         }
 
-        fn multilineCanonical(self: @This()) bool {
+        pub fn dupe(self: VariableDeclaration, allocator: std.mem.Allocator) std.mem.Allocator.Error!VariableDeclaration {
+            const name = try allocator.dupe(u8, self.name);
+            errdefer allocator.free(name);
+
+            var fql_type: ?FQLType = null;
+            if (self.type) |t| {
+                fql_type = try t.dupe(allocator);
+            }
+
+            errdefer if (fql_type) |t| {
+                t.deinit(allocator);
+            };
+
+            return .{
+                .name = name,
+                .type = fql_type,
+                .value = try self.value.dupePtr(allocator),
+            };
+        }
+
+        fn multilineCanonical(self: VariableDeclaration) bool {
             return self.value.multilineCanonical();
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+        pub fn printCanonical(self: VariableDeclaration, writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
             try writer.writeAll("let ");
             try writer.writeAll(self.name);
             if (self.type) |fql_type| {
@@ -442,7 +541,7 @@ pub const FQLExpression = union(enum) {
         body: *const FQLExpression,
         @"else": ?*const FQLExpression = null,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: Conditional, allocator: std.mem.Allocator) void {
             if (self.@"else") |@"else"| {
                 @"else".deinit(allocator);
                 allocator.destroy(@"else");
@@ -454,11 +553,35 @@ pub const FQLExpression = union(enum) {
             allocator.destroy(self.condition);
         }
 
-        fn multilineCanonical(self: @This()) bool {
+        pub fn dupe(self: Conditional, allocator: std.mem.Allocator) std.mem.Allocator.Error!Conditional {
+            var else_expr: ?*const FQLExpression = null;
+            if (self.@"else") |expr| {
+                else_expr = try expr.dupePtr(allocator);
+            }
+
+            errdefer if (else_expr) |expr| {
+                expr.deinit(allocator);
+                allocator.destroy(expr);
+            };
+
+            const body = try self.body.dupePtr(allocator);
+            errdefer {
+                body.deinit(allocator);
+                allocator.destroy(body);
+            }
+
+            return .{
+                .condition = try self.condition.dupePtr(allocator),
+                .body = body,
+                .@"else" = else_expr,
+            };
+        }
+
+        fn multilineCanonical(self: Conditional) bool {
             return self.condition.multilineCanonical() or self.body.multilineCanonical() or (self.@"else" != null and self.@"else".?.multilineCanonical());
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+        pub fn printCanonical(self: Conditional, writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
             try writer.writeAll("if (");
             if (self.condition.multilineCanonical()) {
                 try writer.writeByte('\n');
@@ -487,7 +610,7 @@ pub const FQLExpression = union(enum) {
             },
             short: []const u8,
 
-            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+            pub fn deinit(self: Parameters, allocator: std.mem.Allocator) void {
                 switch (self) {
                     .long => |long| {
                         if (long.parameters) |params| {
@@ -501,22 +624,64 @@ pub const FQLExpression = union(enum) {
                     .short => |s| allocator.free(s),
                 }
             }
+
+            pub fn dupe(self: Parameters, allocator: std.mem.Allocator) std.mem.Allocator.Error!Parameters {
+                return switch (self) {
+                    .long => |long| .{
+                        .long = .{
+                            .parameters = blk: {
+                                const orig_params = long.parameters orelse break :blk null;
+
+                                var i: usize = 0;
+                                const parameters = try allocator.alloc([]const u8, orig_params.len);
+                                errdefer {
+                                    for (parameters[0..i]) |parameter| {
+                                        allocator.free(parameter);
+                                    }
+
+                                    allocator.free(parameters);
+                                }
+
+                                for (orig_params) |param| {
+                                    parameters[i] = try allocator.dupe(u8, param);
+
+                                    i += 1;
+                                }
+
+                                break :blk parameters;
+                            },
+                            .variadic = long.variadic,
+                        },
+                    },
+                    .short => |short| .{ .short = try allocator.dupe(u8, short) },
+                };
+            }
         };
 
         parameters: Parameters,
         body: *const FQLExpression,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: Function, allocator: std.mem.Allocator) void {
             self.parameters.deinit(allocator);
             self.body.deinit(allocator);
             allocator.destroy(self.body);
         }
 
-        fn multilineCanonical(self: @This()) bool {
+        pub fn dupe(self: Function, allocator: std.mem.Allocator) std.mem.Allocator.Error!Function {
+            const parameters = try self.parameters.dupe(allocator);
+            errdefer parameters.deinit(allocator);
+
+            return .{
+                .parameters = parameters,
+                .body = try self.body.dupePtr(allocator),
+            };
+        }
+
+        fn multilineCanonical(self: Function) bool {
             return self.body.multilineCanonical();
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+        pub fn printCanonical(self: Function, writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
             switch (self.parameters) {
                 .long => |l| {
                     try writer.writeByte('(');
@@ -554,7 +719,7 @@ pub const FQLExpression = union(enum) {
                 value: *const FQLExpression,
             },
 
-            fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+            pub fn deinit(self: Field, allocator: std.mem.Allocator) void {
                 switch (self) {
                     .short => |s| allocator.free(s),
                     .long => |l| {
@@ -565,7 +730,24 @@ pub const FQLExpression = union(enum) {
                 }
             }
 
-            fn multilineCanonical(self: @This()) bool {
+            pub fn dupe(self: Field, allocator: std.mem.Allocator) std.mem.Allocator.Error!Field {
+                return switch (self) {
+                    .short => |short| .{ .short = try allocator.dupe(u8, short) },
+                    .long => |long| .{
+                        .long = blk: {
+                            const key = try allocator.dupe(u8, long.key);
+                            errdefer allocator.free(key);
+
+                            break :blk .{
+                                .key = key,
+                                .value = try long.value.dupePtr(allocator),
+                            };
+                        },
+                    },
+                };
+            }
+
+            fn multilineCanonical(self: Field) bool {
                 return self == .long and self.long.value.multilineCanonical();
             }
         };
@@ -573,7 +755,7 @@ pub const FQLExpression = union(enum) {
         expression: *const FQLExpression,
         fields: ?[]const Field = null,
 
-        fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: Projection, allocator: std.mem.Allocator) void {
             if (self.fields) |fields| {
                 for (fields) |field| {
                     field.deinit(allocator);
@@ -586,11 +768,24 @@ pub const FQLExpression = union(enum) {
             allocator.destroy(self.expression);
         }
 
-        fn multilineCanonical(self: @This()) bool {
+        pub fn dupe(self: Projection, allocator: std.mem.Allocator) std.mem.Allocator.Error!Projection {
+            const expr = try self.expression.dupePtr(allocator);
+            errdefer {
+                expr.deinit(allocator);
+                allocator.destroy(expr);
+            }
+
+            return .{
+                .expression = expr,
+                .fields = try util.slice.deepDupe(allocator, self.fields),
+            };
+        }
+
+        fn multilineCanonical(self: Projection) bool {
             return self.expression.multilineCanonical() or (self.fields != null and util.slice.some(self.fields.?, Field.multilineCanonical));
         }
 
-        pub fn printCanonical(self: @This(), writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
+        pub fn printCanonical(self: Projection, writer: std.io.AnyWriter, indent_str: []const u8, level: usize) !void {
             try self.expression.printCanonical(writer, indent_str, level);
 
             try writer.writeAll(" {");
@@ -657,7 +852,7 @@ pub const FQLExpression = union(enum) {
     projection: Projection,
     non_null_assertion: *const FQLExpression,
 
-    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+    pub fn deinit(self: FQLExpression, allocator: std.mem.Allocator) void {
         // std.debug.print("deinit FQLExpression.{s}\n", .{@tagName(self)});
         switch (self) {
             inline .isolated, .non_null_assertion => |s| {
@@ -691,6 +886,39 @@ pub const FQLExpression = union(enum) {
         }
     }
 
+    pub fn dupe(self: FQLExpression, allocator: std.mem.Allocator) std.mem.Allocator.Error!FQLExpression {
+        return switch (self) {
+            inline .isolated, .non_null_assertion => |e, tag| @unionInit(FQLExpression, @tagName(tag), try e.dupePtr(allocator)),
+            inline .identifier,
+            .number_literal,
+            .string_literal,
+            => |s, tag| @unionInit(FQLExpression, @tagName(tag), try allocator.dupe(u8, s)),
+            inline .object_literal,
+            .array_literal,
+            .unary_operation,
+            .binary_operation,
+            .function,
+            .invocation,
+            .field_access,
+            .variable_declaration,
+            .conditional,
+            .anonymous_field_access,
+            .projection,
+            => |expr, tag| @unionInit(FQLExpression, @tagName(tag), try expr.dupe(allocator)),
+            .block_scope => |exprs| .{ .block_scope = try util.slice.deepDupe(allocator, exprs) },
+            inline .null, .boolean_literal => |v, tag| @unionInit(FQLExpression, @tagName(tag), v),
+        };
+    }
+
+    fn dupePtr(self: *const FQLExpression, allocator: std.mem.Allocator) !*FQLExpression {
+        const ptr = try allocator.create(FQLExpression);
+        errdefer allocator.destroy(ptr);
+
+        ptr.* = try self.dupe(allocator);
+
+        return ptr;
+    }
+
     fn multilineCanonical(self: FQLExpression) bool {
         return switch (self) {
             .identifier, .number_literal, .string_literal, .null, .boolean_literal => false,
@@ -704,7 +932,7 @@ pub const FQLExpression = union(enum) {
         };
     }
 
-    pub fn printCanonical(self: FQLExpression, writer: std.io.AnyWriter, indent_str: []const u8, level: usize) std.io.AnyWriter.Error!void {
+    pub fn printCanonical(self: FQLExpression, writer: anytype, indent_str: []const u8, level: usize) @TypeOf(writer).Error!void {
         switch (self) {
             inline .identifier, .number_literal, .string_literal => |s| try writer.writeAll(s),
             .null => try writer.writeAll("null"),
@@ -748,6 +976,24 @@ pub const FQLExpression = union(enum) {
             },
             inline else => |e| try e.printCanonical(writer, indent_str, level),
         }
+    }
+
+    pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = options;
+
+        comptime var fmt_end = fmt.len;
+
+        comptime var level: usize = 0;
+        comptime {
+            if (std.mem.indexOfScalar(u8, fmt, '.')) |pos| {
+                level = try std.fmt.parseInt(usize, fmt[0..pos], 10);
+                fmt_end = pos;
+            }
+        }
+
+        const index_str: []const u8 = " " ** (std.fmt.parseInt(usize, fmt[0..fmt_end], 10) catch 4);
+
+        try self.printCanonical(writer, index_str, level);
     }
 
     pub fn toCanonicalString(self: @This(), allocator: std.mem.Allocator) ![]const u8 {
@@ -1975,8 +2221,6 @@ pub const FQLExpression = union(enum) {
 pub const parseExpression = FQLExpression.Parser.parseReader;
 
 fn expectParsedExprEqual(str: []const u8, expected: FQLExpression) !void {
-    try parsing.checkForLeaks(FQLExpression.Parser, str);
-
     var stream = std.io.fixedBufferStream(str);
     var actual = (try parseExpression(testing.allocator, stream.reader().any())).?;
     defer actual.deinit(testing.allocator);
@@ -1989,6 +2233,11 @@ fn expectParsedExprEqual(str: []const u8, expected: FQLExpression) !void {
     defer testing.allocator.free(canonical_string);
 
     try testing.expectEqualStrings(str, canonical_string);
+
+    try parsing.checkForLeaks(FQLExpression.Parser, str);
+
+    try parsing.testDupe(expected);
+    try parsing.testDupe(actual);
 }
 
 test parseExpression {
