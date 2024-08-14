@@ -106,11 +106,11 @@ pub const SchemaDefinition = union(enum) {
         }
 
         pub fn dupe(self: AccessProvider, allocator: std.mem.Allocator) std.mem.Allocator.Error!AccessProvider {
-            const name = try allocator.dupe(u8, self.name);
-            errdefer allocator.free(name);
+            const n = try allocator.dupe(u8, self.name);
+            errdefer allocator.free(n);
 
             return .{
-                .name = name,
+                .name = n,
                 .members = try util.slice.deepDupe(allocator, self.members),
             };
         }
@@ -158,11 +158,11 @@ pub const SchemaDefinition = union(enum) {
                         expr.deinit(allocator);
                     };
 
-                    const name = try allocator.dupe(u8, self.name);
-                    errdefer allocator.free(name);
+                    const n = try allocator.dupe(u8, self.name);
+                    errdefer allocator.free(n);
 
                     return .{
-                        .name = name,
+                        .name = n,
                         .type = try self.type.dupe(allocator),
                         .default = default,
                     };
@@ -241,11 +241,11 @@ pub const SchemaDefinition = union(enum) {
                 }
 
                 pub fn dupe(self: Index, allocator: std.mem.Allocator) std.mem.Allocator.Error!Index {
-                    const name = try allocator.dupe(u8, self.name);
-                    errdefer allocator.free(name);
+                    const n = try allocator.dupe(u8, self.name);
+                    errdefer allocator.free(n);
 
                     return .{
-                        .name = name,
+                        .name = n,
                         .members = try util.slice.deepDupe(allocator, self.members),
                     };
                 }
@@ -278,11 +278,11 @@ pub const SchemaDefinition = union(enum) {
                     }
 
                     pub fn dupe(self: Backfill, allocator: std.mem.Allocator) std.mem.Allocator.Error!Backfill {
-                        const name = try self.name.dupe(allocator);
-                        errdefer name.deinit(allocator);
+                        const n = try self.name.dupe(allocator);
+                        errdefer n.deinit(allocator);
 
                         return .{
-                            .name = name,
+                            .name = n,
                             .value = try self.value.dupe(allocator),
                         };
                     }
@@ -435,11 +435,11 @@ pub const SchemaDefinition = union(enum) {
                 }
 
                 pub fn dupe(self: CheckConstraint, allocator: std.mem.Allocator) std.mem.Allocator.Error!CheckConstraint {
-                    const name = try allocator.dupe(u8, self.name);
-                    errdefer allocator.free(name);
+                    const n = try allocator.dupe(u8, self.name);
+                    errdefer allocator.free(n);
 
                     return .{
-                        .name = name,
+                        .name = n,
                         .predicate = try self.predicate.dupe(allocator),
                     };
                 }
@@ -467,8 +467,8 @@ pub const SchemaDefinition = union(enum) {
                 }
 
                 pub fn dupe(self: ComputedField, allocator: std.mem.Allocator) std.mem.Allocator.Error!ComputedField {
-                    const name = try allocator.dupe(u8, self.name);
-                    errdefer allocator.free(name);
+                    const n = try allocator.dupe(u8, self.name);
+                    errdefer allocator.free(n);
 
                     var fql_type: ?FQLType = null;
                     if (self.type) |t| {
@@ -480,7 +480,7 @@ pub const SchemaDefinition = union(enum) {
                     };
 
                     return .{
-                        .name = name,
+                        .name = n,
                         .type = fql_type,
                         .function = try self.function.dupe(allocator),
                     };
@@ -592,12 +592,12 @@ pub const SchemaDefinition = union(enum) {
                 expr.deinit(allocator);
             };
 
-            const name = try allocator.dupe(u8, self.name);
-            errdefer allocator.free(name);
+            const n = try allocator.dupe(u8, self.name);
+            errdefer allocator.free(n);
 
             return .{
                 .alias = alias,
-                .name = name,
+                .name = n,
                 .members = try util.slice.deepDupe(allocator, self.members),
             };
         }
@@ -795,11 +795,11 @@ pub const SchemaDefinition = union(enum) {
         }
 
         pub fn dupe(self: Role, allocator: std.mem.Allocator) std.mem.Allocator.Error!Role {
-            const name = try allocator.dupe(u8, self.name);
-            errdefer allocator.free(name);
+            const n = try allocator.dupe(u8, self.name);
+            errdefer allocator.free(n);
 
             return .{
-                .name = name,
+                .name = n,
                 .members = try util.slice.deepDupe(allocator, self.members),
             };
         }
@@ -835,11 +835,11 @@ pub const SchemaDefinition = union(enum) {
             }
 
             pub fn dupe(self: Parameter, allocator: std.mem.Allocator) std.mem.Allocator.Error!Parameter {
-                const name = try allocator.dupe(u8, self.name);
-                errdefer allocator.free(name);
+                const n = try allocator.dupe(u8, self.name);
+                errdefer allocator.free(n);
 
                 return .{
-                    .name = name,
+                    .name = n,
                     .type = if (self.type) |t| try t.dupe(allocator) else null,
                 };
             }
@@ -896,8 +896,8 @@ pub const SchemaDefinition = union(enum) {
                 expr.deinit(allocator);
             };
 
-            const name = try allocator.dupe(u8, self.name);
-            errdefer allocator.free(name);
+            const n = try allocator.dupe(u8, self.name);
+            errdefer allocator.free(n);
 
             const parameters = try util.slice.deepDupe(allocator, self.parameters);
             errdefer if (parameters) |params| {
@@ -916,7 +916,7 @@ pub const SchemaDefinition = union(enum) {
             return .{
                 .alias = alias,
                 .role = role,
-                .name = name,
+                .name = n,
                 .parameters = parameters,
                 .return_type = return_type,
                 .body = try util.slice.deepDupe(allocator, self.body),
@@ -1019,7 +1019,13 @@ pub const SchemaDefinition = union(enum) {
     role: Role,
     function: Function,
 
-    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+    pub fn name(self: SchemaDefinition) []const u8 {
+        return switch (self) {
+            inline else => |s| s.name,
+        };
+    }
+
+    pub fn deinit(self: SchemaDefinition, allocator: std.mem.Allocator) void {
         switch (self) {
             inline else => |d| d.deinit(allocator),
         }
@@ -1152,7 +1158,7 @@ pub const SchemaDefinition = union(enum) {
                 fn deinit(self: @This(), allocator: std.mem.Allocator) void {
                     switch (self) {
                         .before_name, .start => {},
-                        .after_name => |name| allocator.free(name),
+                        .after_name => |n| allocator.free(n),
                         inline else => |v| v.deinit(allocator),
                     }
                 }
@@ -1290,8 +1296,8 @@ pub const SchemaDefinition = union(enum) {
                         } = .before_lbrace,
 
                         fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                            if (self.name) |name| {
-                                allocator.free(name);
+                            if (self.name) |n| {
+                                allocator.free(n);
                             }
 
                             for (self.members.items) |member| {
@@ -1329,8 +1335,8 @@ pub const SchemaDefinition = union(enum) {
                         parser: FQLExpression.Parser.Unmanaged = .{},
 
                         fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                            if (self.name) |name| {
-                                allocator.free(name);
+                            if (self.name) |n| {
+                                allocator.free(n);
                             }
 
                             self.parser.deinit(allocator);
@@ -1345,8 +1351,8 @@ pub const SchemaDefinition = union(enum) {
                         } = null,
 
                         fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                            if (self.name) |name| {
-                                allocator.free(name);
+                            if (self.name) |n| {
+                                allocator.free(n);
                             }
 
                             if (self.type) |fql_type| {
@@ -1374,8 +1380,8 @@ pub const SchemaDefinition = union(enum) {
                 member_state: ?Member = null,
 
                 fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                    if (self.name) |name| {
-                        allocator.free(name);
+                    if (self.name) |n| {
+                        allocator.free(n);
                     }
 
                     if (self.member_state) |state| {
@@ -1459,8 +1465,8 @@ pub const SchemaDefinition = union(enum) {
                 } = null,
 
                 fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-                    if (self.name) |name| {
-                        allocator.free(name);
+                    if (self.name) |n| {
+                        allocator.free(n);
                     }
 
                     if (self.member_state) |state| {
@@ -1491,7 +1497,7 @@ pub const SchemaDefinition = union(enum) {
                     fn deinit(self: @This(), allocator: std.mem.Allocator) void {
                         switch (self.param_state) {
                             .start, .end => {},
-                            .after_name => |name| allocator.free(name),
+                            .after_name => |n| allocator.free(n),
                             .before_type => |before_type| {
                                 allocator.free(before_type.name);
                                 before_type.type_parser.deinit(allocator);
@@ -1569,7 +1575,7 @@ pub const SchemaDefinition = union(enum) {
                 fn deinit(self: @This(), allocator: std.mem.Allocator) void {
                     switch (self) {
                         .start => {},
-                        .after_name => |name| allocator.free(name),
+                        .after_name => |n| allocator.free(n),
                         inline else => |state| state.deinit(allocator),
                     }
                 }
@@ -1719,10 +1725,10 @@ pub const SchemaDefinition = union(enum) {
                                 },
                             }
                         },
-                        .after_name => |name| {
+                        .after_name => |n| {
                             switch (token) {
                                 .lbrace => {
-                                    access_provider.* = .{ .body = .{ .name = name } };
+                                    access_provider.* = .{ .body = .{ .name = n } };
                                 },
                                 else => {
                                     std.log.err("unexpected token: expected lbrace but got {s}", .{@tagName(token)});
@@ -1795,13 +1801,13 @@ pub const SchemaDefinition = union(enum) {
                                                 },
                                             }
                                         },
-                                        .name => |name| {
+                                        .name => |n| {
                                             switch (token) {
                                                 .lbrace => {
-                                                    role.* = .{ .block = name };
+                                                    role.* = .{ .block = n };
                                                 },
                                                 .eol, .semi => {
-                                                    try body.members.append(allocator, .{ .role = .{ .name = name } });
+                                                    try body.members.append(allocator, .{ .role = .{ .name = n } });
 
                                                     body.state = .empty;
                                                 },
@@ -1811,7 +1817,7 @@ pub const SchemaDefinition = union(enum) {
                                                 },
                                             }
                                         },
-                                        .block => |name| {
+                                        .block => |n| {
                                             switch (token) {
                                                 .eol, .semi => {},
                                                 .word => |word| {
@@ -1820,7 +1826,7 @@ pub const SchemaDefinition = union(enum) {
                                                         return error.UnexpectedToken;
                                                     }
 
-                                                    role.* = .{ .predicate = .{ .name = name } };
+                                                    role.* = .{ .predicate = .{ .name = n } };
                                                 },
                                                 else => {
                                                     std.log.err("unexpected token: expected eol, semi or word but got {s}", .{@tagName(token)});
@@ -1890,8 +1896,8 @@ pub const SchemaDefinition = union(enum) {
                 .collection => |*collection| {
                     if (collection.name == null) {
                         switch (token) {
-                            inline .string, .word => |name| {
-                                collection.name = try allocator.dupe(u8, name);
+                            inline .string, .word => |n| {
+                                collection.name = try allocator.dupe(u8, n);
                             },
                             else => {
                                 std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
@@ -2186,8 +2192,8 @@ pub const SchemaDefinition = union(enum) {
                         .index => |*index| {
                             if (index.name == null) {
                                 switch (token) {
-                                    inline .string, .word => |name| {
-                                        index.name = try allocator.dupe(u8, name);
+                                    inline .string, .word => |n| {
+                                        index.name = try allocator.dupe(u8, n);
                                     },
                                     else => {
                                         std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
@@ -2356,8 +2362,8 @@ pub const SchemaDefinition = union(enum) {
                         .check => |*check| {
                             if (check.name == null) {
                                 switch (token) {
-                                    inline .string, .word => |name| {
-                                        check.name = try allocator.dupe(u8, name);
+                                    inline .string, .word => |n| {
+                                        check.name = try allocator.dupe(u8, n);
                                     },
                                     else => {
                                         std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
@@ -2383,8 +2389,8 @@ pub const SchemaDefinition = union(enum) {
                         .compute => |*compute| {
                             if (compute.name == null) {
                                 switch (token) {
-                                    inline .string, .word => |name| {
-                                        compute.name = try allocator.dupe(u8, name);
+                                    inline .string, .word => |n| {
+                                        compute.name = try allocator.dupe(u8, n);
                                     },
                                     else => {
                                         std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
@@ -2440,8 +2446,8 @@ pub const SchemaDefinition = union(enum) {
                 .role => |*role| {
                     if (role.name == null) {
                         switch (token) {
-                            inline .string, .word => |name| {
-                                role.name = try allocator.dupe(u8, name);
+                            inline .string, .word => |n| {
+                                role.name = try allocator.dupe(u8, n);
                             },
                             else => {
                                 std.log.err("unexpected token: expected word or string but got {s}", .{@tagName(token)});
@@ -2685,10 +2691,10 @@ pub const SchemaDefinition = union(enum) {
                                 },
                             }
                         },
-                        .after_name => |name| {
+                        .after_name => |n| {
                             switch (token) {
                                 .lparen => {
-                                    function.* = .{ .params = .{ .name = name } };
+                                    function.* = .{ .params = .{ .name = n } };
                                 },
                                 else => {
                                     std.log.err("unexpected token: expected lparen but got {s}", .{@tagName(token)});
@@ -2713,13 +2719,13 @@ pub const SchemaDefinition = union(enum) {
                                         },
                                     }
                                 },
-                                .after_name => |name| {
+                                .after_name => |n| {
                                     switch (token) {
                                         .colon => {
-                                            params.param_state = .{ .before_type = .{ .name = name } };
+                                            params.param_state = .{ .before_type = .{ .name = n } };
                                         },
                                         .rparen, .comma => {
-                                            try params.params.append(allocator, .{ .name = name });
+                                            try params.params.append(allocator, .{ .name = n });
                                             params.param_state = .end;
                                             return .{ .save = token };
                                         },
@@ -2839,8 +2845,8 @@ pub const SchemaDefinition = union(enum) {
                                 defer allocator.free(annotation.name);
 
                                 if (std.meta.fields(E).len > 0) {
-                                    if (std.meta.stringToEnum(E, annotation.name)) |name| {
-                                        switch (name) {
+                                    if (std.meta.stringToEnum(E, annotation.name)) |n| {
+                                        switch (n) {
                                             inline else => |tag| {
                                                 @field(def, @tagName(tag)) = annotation.value;
                                             },
