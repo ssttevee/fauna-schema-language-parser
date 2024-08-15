@@ -173,6 +173,7 @@ pub const SchemaDefinition = union(enum) {
                     try writer.writeAll(": ");
                     try self.type.printCanonical(writer);
                     if (self.default) |default| {
+                        try writer.writeAll(" = ");
                         try default.printCanonical(writer, indent_str, 2);
                     }
                 }
