@@ -1,7 +1,12 @@
 .{
     .name = "fauna10",
     .version = "0.0.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .sourcemap = .{
+            .url = "https://github.com/ssttevee/zig-sourcemap/archive/209dca2da4dbdcac4e6e2d1c1f2ff4f2f3d8c038.tar.gz",
+            .hash = "122095fcce85258a08b25dafe984eaa440bd19f76df47fca61f6e536fa109fba9e17",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

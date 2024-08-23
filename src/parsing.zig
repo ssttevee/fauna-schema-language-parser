@@ -29,7 +29,7 @@ pub fn ManagedParser(comptime UnmanagedParser: type) type {
 
         pub const PushResult = UnmanagedParser.PushResult;
 
-        pub fn pushToken(self: *Self, token: Tokenizer.Token) !PushResult {
+        pub fn pushToken(self: *Self, token: Tokenizer.TokenWithLocation) !PushResult {
             return try self.inner.pushToken(self.allocator, token);
         }
 
@@ -55,17 +55,22 @@ pub fn ManagedParser(comptime UnmanagedParser: type) type {
                     return final;
                 }
 
-                if (token == .eof and parser.inner.state == .empty and (!@hasField(Unmanaged, "parent") or parser.inner.parent == null)) {
+                if (token.token == .eof and parser.inner.state == .empty and (!@hasField(Unmanaged, "parent") or parser.inner.parent == null)) {
                     return null;
                 }
             }
         }
 
-        pub fn parseReader(allocator: std.mem.Allocator, reader: std.io.AnyReader) !?T {
-            var it = Tokenizer.TokenIterator.init(reader);
+        pub fn parseReader(allocator: std.mem.Allocator, reader: std.io.AnyReader, source_file: ?[]const u8) !?T {
+            var it = Tokenizer.TokenIterator.init(reader, source_file);
             defer it.deinit(allocator);
 
             return try parseIterator(allocator, &it);
+        }
+
+        pub fn parseString(allocator: std.mem.Allocator, str: []const u8, source_file: ?[]const u8) !?T {
+            var stream = std.io.fixedBufferStream(str);
+            return try parseReader(allocator, stream.reader().any(), source_file);
         }
     };
 }
@@ -81,7 +86,7 @@ pub fn checkForLeaks(comptime P: type, str: []const u8) !void {
         defer parser.deinit();
 
         var stream = std.io.fixedBufferStream(str);
-        var it = Tokenizer.TokenIterator.init(stream.reader().any());
+        var it = Tokenizer.TokenIterator.init(stream.reader().any(), null);
         defer it.deinit(allocator);
 
         var i: usize = 0;
@@ -119,6 +124,13 @@ pub fn testDupe(value: anytype) !void {
     const allocator = gpa.allocator();
 
     const duped = try value.dupe(allocator);
+
+    testing.expectEqualDeep(value, duped) catch |err| {
+        duped.deinit(allocator);
+
+        return err;
+    };
+
     duped.deinit(allocator);
 
     if (gpa.deinit() == .leak) {

@@ -2,26 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const util = @import("util.zig");
-
-/// https://docs.fauna.com/fauna/current/reference/fql_reference/lexical#whitespace
-fn isWhitespace(char: u8) bool {
-    // character tab            : u+0009
-    // line tab                 : u+000B
-    // form feed                : u+000C
-    // space                    : u+0020
-    // no-break space           : u+00A0
-    // zero-width no-break space: u+feff (unhandled)
-    return char == '\x09' or char == '\x0B' or char == '\x0C' or char == '\x20' or char == '\xA0';
-}
-
-/// https://docs.fauna.com/fauna/current/reference/fql_reference/lexical#line-terminators
-fn isLineTerminator(char: u8) bool {
-    // line-feed          : u+000A
-    // carriage return    : u+000D
-    // line separator     : u+2028 (unhandled)
-    // paragraph separator: u+2029 (unhandled)
-    return char == '\x0A' or char == '\x0D';
-}
+const common = @import("common.zig");
 
 fn isIdentifierChar(char: u8, index: usize) bool {
     return char == '_' or ('a' <= char and char <= 'z') or ('A' <= char and char <= 'Z') or (index > 0 and '0' <= char and char <= '9');
@@ -34,6 +15,22 @@ fn isQuote(char: u8) bool {
 fn isNumberChar(char: u8, index: usize) bool {
     return (('0' <= char and char <= '9') or char == '-') or (index == 1 and (char == 'b' or char == 'o' or char == 'x')) or (index > 0 and (char == '.' or char == '_' or char == 'e')) or (index > 2 and (('a' <= char and char <= 'f') or ('A' <= char and char <= 'F')));
 }
+
+pub const TokenWithLocation = struct {
+    token: Token,
+    location: ?common.SourceLocation,
+
+    pub fn deinit(self: TokenWithLocation, allocator: std.mem.Allocator) void {
+        self.token.deinit(allocator);
+    }
+
+    pub fn dupe(self: TokenWithLocation, allocator: std.mem.Allocator) !TokenWithLocation {
+        return .{
+            .token = try self.token.dupe(allocator),
+            .location = self.location,
+        };
+    }
+};
 
 pub const Token = union(enum) {
     eof,
@@ -139,9 +136,9 @@ const WordPrefix = union(enum) {
 buf_start: usize = 0,
 buf_end: usize = 0,
 buf: [2048]u8 = undefined,
-saved_token: ?Token = null,
 is_eof: bool = false,
 
+current_offset: usize = 0,
 current_line: usize = 0,
 current_col: usize = 0,
 
@@ -172,9 +169,19 @@ pub fn write(self: *Tokenizer, bytes: []const u8) !usize {
     return written;
 }
 
+pub fn currentPosition(self: *Tokenizer) common.Position {
+    return .{
+        .offset = @intCast(self.current_offset),
+        .line = @intCast(self.current_line),
+        .column = @intCast(self.current_col),
+    };
+}
+
 fn consumeBytes(self: *Tokenizer, n: usize) void {
     const consumed_bytes = self.buf[self.buf_start .. self.buf_start + n];
     self.buf_start += n;
+
+    self.current_offset += n;
 
     var line_it = std.mem.splitScalar(u8, consumed_bytes, '\n');
     var last_line = line_it.next().?;
@@ -202,10 +209,12 @@ fn consumeBytes(self: *Tokenizer, n: usize) void {
 pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
     var chars: []const u8 = self.buf[self.buf_start..self.buf_end];
 
-    while (chars.len > 0 and isWhitespace(chars[0])) {
-        chars.ptr += 1;
-        chars.len -= 1;
-        self.consumeBytes(1);
+    const leading_whitespace_len = util.slice.indexOfNoneFn(chars, util.isWhitespace) orelse chars.len;
+    if (leading_whitespace_len > 0) {
+        chars.ptr += leading_whitespace_len;
+        chars.len -= leading_whitespace_len;
+        self.consumeBytes(leading_whitespace_len);
+        return error.BumpStartPosition;
     }
 
     if (chars.len == 0) {
@@ -216,8 +225,8 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
         }
     }
 
-    if (isLineTerminator(chars[0])) {
-        if (util.slice.indexOfNonePosFn(chars, 1, isLineTerminator)) |pos| {
+    if (util.isLineTerminator(chars[0])) {
+        if (util.slice.indexOfNonePosFn(chars, 1, util.isLineTerminator)) |pos| {
             self.consumeBytes(pos);
             return .eol;
         } else {
@@ -381,7 +390,7 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
     }
 
     if (chars.len >= 2 and isQuote(chars[0])) {
-        const eol_pos = util.slice.indexOfPosFn(chars, 1, isLineTerminator);
+        const eol_pos = util.slice.indexOfPosFn(chars, 1, util.isLineTerminator);
 
         var start: usize = 1;
         while (std.mem.indexOfScalarPos(u8, chars, start, chars[0])) |pos| {
@@ -403,7 +412,7 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
     }
 
     if (chars.len >= 2 and chars[0] == '/' and chars[1] == '/') {
-        const pos = util.slice.indexOfPosFn(chars, 2, isLineTerminator);
+        const pos = util.slice.indexOfPosFn(chars, 2, util.isLineTerminator);
         if (pos == null) {
             if (!self.is_eof) {
                 return error.NeedMoreData;
@@ -413,7 +422,7 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
             return .{ .comment_line = try allocator.dupe(u8, chars) };
         }
 
-        self.consumeBytes(pos.? + 1);
+        self.consumeBytes(pos.?);
         return .{ .comment_line = try allocator.dupe(u8, chars[0..pos.?]) };
     }
 
@@ -477,12 +486,16 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
 }
 
 pub const TokenIterator = struct {
+    source_file: ?[]const u8,
     reader: std.io.AnyReader,
     tokenizer: Tokenizer = .{},
-    saved_token: ?Token = null,
+    saved_token: ?TokenWithLocation = null,
 
-    pub fn init(reader: std.io.AnyReader) TokenIterator {
-        return .{ .reader = reader };
+    pub fn init(reader: std.io.AnyReader, source_file: ?[]const u8) TokenIterator {
+        return .{
+            .reader = reader,
+            .source_file = source_file,
+        };
     }
 
     pub fn deinit(self: TokenIterator, allocator: std.mem.Allocator) void {
@@ -491,30 +504,45 @@ pub const TokenIterator = struct {
         }
     }
 
-    pub fn saveToken(self: *TokenIterator, token: ?Token) void {
+    pub fn saveToken(self: *TokenIterator, token: ?TokenWithLocation) void {
         std.debug.assert(self.saved_token == null);
         self.saved_token = token;
     }
 
-    pub fn nextToken(self: *TokenIterator, allocator: std.mem.Allocator) !Token {
+    pub fn nextToken(self: *TokenIterator, allocator: std.mem.Allocator) !TokenWithLocation {
         if (try self.next(allocator)) |token| {
             return token;
         }
 
-        return .eof;
+        return .{
+            .token = .eof,
+            .location = .{
+                .source = self.source_file,
+                .start = self.tokenizer.currentPosition(),
+                .end = self.tokenizer.currentPosition(),
+            },
+        };
     }
 
-    fn dirtyNext(self: *TokenIterator, allocator: std.mem.Allocator) !?Token {
+    pub fn next(self: *TokenIterator, allocator: std.mem.Allocator) !?TokenWithLocation {
         if (self.saved_token) |token| {
             self.saved_token = null;
-            if (token == .eof) {
+            if (token.token == .eof) {
                 return null;
             }
+
             return token;
         }
 
+        var start = self.tokenizer.currentPosition();
+
         while (true) {
-            return self.tokenizer.next(allocator) catch |err| {
+            if (self.tokenizer.next(allocator) catch |err| {
+                if (err == error.BumpStartPosition) {
+                    start = self.tokenizer.currentPosition();
+                    continue;
+                }
+
                 if (err == error.NeedMoreData and !self.tokenizer.is_eof) {
                     var buf: [@typeInfo(std.meta.FieldType(Tokenizer, .buf)).Array.len]u8 = undefined;
 
@@ -529,16 +557,19 @@ pub const TokenIterator = struct {
                 }
 
                 return err;
-            };
-        }
-    }
+            }) |token| {
+                return .{
+                    .token = token,
+                    .location = .{
+                        .source = self.source_file,
+                        .start = start,
+                        .end = self.tokenizer.currentPosition(),
+                    },
+                };
+            }
 
-    pub fn next(self: *TokenIterator, allocator: std.mem.Allocator) !?Token {
-        if (try self.dirtyNext(allocator)) |token| {
-            return token;
+            return null;
         }
-
-        return null;
     }
 };
 
@@ -546,81 +577,85 @@ fn expectNextTokenNull(it: *TokenIterator) !void {
     try testing.expectEqualDeep(null, try it.next(testing.allocator));
 }
 
-fn expectNextTokenEqualDeep(it: *TokenIterator, line: usize, col: usize, expected: Token) !void {
+fn expectNextTokenEqualDeep(it: *TokenIterator, expected: Token, start: [3]u64, end: [3]u64) !void {
     const token = (try it.next(testing.allocator)).?;
     defer token.deinit(testing.allocator);
 
-    try testing.expectEqualDeep(expected, token);
-    try testing.expectEqual(line, it.tokenizer.current_line);
-    try testing.expectEqual(col, it.tokenizer.current_col);
+    try testing.expectEqualDeep(expected, token.token);
+    try testing.expectEqual(start[0], token.location.start.offset);
+    try testing.expectEqual(start[1], token.location.start.line);
+    try testing.expectEqual(start[2], token.location.start.column);
+    try testing.expectEqual(end[0], token.location.end.offset);
+    try testing.expectEqual(end[1], token.location.end.line);
+    try testing.expectEqual(end[2], token.location.end.column);
 }
 
 test "read token" {
     {
         var stream = std.io.fixedBufferStream("");
-        var it = TokenIterator.init(stream.reader().any());
+        var it = TokenIterator.init(stream.reader().any(), null);
         try expectNextTokenNull(&it);
     }
 
     {
         var stream = std.io.fixedBufferStream("2s3a4_y5.6e");
-        var it = TokenIterator.init(stream.reader().any());
-        try expectNextTokenEqualDeep(&it, 0, 11, .{ .number = "2s3a4_y5.6e" });
+        var it = TokenIterator.init(stream.reader().any(), null);
+        try expectNextTokenEqualDeep(&it, .{ .number = "2s3a4_y5.6e" }, .{ 0, 0, 0 }, .{ 11, 0, 11 });
         try expectNextTokenNull(&it);
     }
 
     {
         var stream = std.io.fixedBufferStream("-12_3as_dv.2e3.foo");
-        var it = TokenIterator.init(stream.reader().any());
-        try expectNextTokenEqualDeep(&it, 0, 14, .{ .number = "-12_3as_dv.2e3" });
-        try expectNextTokenEqualDeep(&it, 0, 15, .dot);
-        try expectNextTokenEqualDeep(&it, 0, 18, .{ .word = "foo" });
+        var it = TokenIterator.init(stream.reader().any(), null);
+        try expectNextTokenEqualDeep(&it, .{ .number = "-12_3as_dv.2e3" }, .{ 0, 0, 0 }, .{ 14, 0, 14 });
+        try expectNextTokenEqualDeep(&it, .dot, .{ 14, 0, 14 }, .{ 15, 0, 15 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "foo" }, .{ 15, 0, 15 }, .{ 18, 0, 18 });
         try expectNextTokenNull(&it);
     }
 
     {
         var stream = std.io.fixedBufferStream("collection Product {}");
-        var it = TokenIterator.init(stream.reader().any());
-        try expectNextTokenEqualDeep(&it, 0, 10, .{ .word = "collection" });
-        try expectNextTokenEqualDeep(&it, 0, 18, .{ .word = "Product" });
-        try expectNextTokenEqualDeep(&it, 0, 20, .lbrace);
-        try expectNextTokenEqualDeep(&it, 0, 21, .rbrace);
+        var it = TokenIterator.init(stream.reader().any(), null);
+        try expectNextTokenEqualDeep(&it, .{ .word = "collection" }, .{ 0, 0, 0 }, .{ 10, 0, 10 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "Product" }, .{ 11, 0, 11 }, .{ 18, 0, 18 });
+        try expectNextTokenEqualDeep(&it, .lbrace, .{ 19, 0, 19 }, .{ 20, 0, 20 });
+        try expectNextTokenEqualDeep(&it, .rbrace, .{ 20, 0, 20 }, .{ 21, 0, 21 });
         try expectNextTokenNull(&it);
     }
 
     {
         var stream = std.io.fixedBufferStream("move.a->.b");
-        var it = TokenIterator.init(stream.reader().any());
-        try expectNextTokenEqualDeep(&it, 0, 4, .{ .word = "move" });
-        try expectNextTokenEqualDeep(&it, 0, 5, .dot);
-        try expectNextTokenEqualDeep(&it, 0, 6, .{ .word = "a" });
-        try expectNextTokenEqualDeep(&it, 0, 8, .minus_rarrow);
-        try expectNextTokenEqualDeep(&it, 0, 9, .dot);
-        try expectNextTokenEqualDeep(&it, 0, 10, .{ .word = "b" });
+        var it = TokenIterator.init(stream.reader().any(), null);
+        try expectNextTokenEqualDeep(&it, .{ .word = "move" }, .{ 0, 0, 0 }, .{ 4, 0, 4 });
+        try expectNextTokenEqualDeep(&it, .dot, .{ 4, 0, 4 }, .{ 5, 0, 5 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "a" }, .{ 5, 0, 5 }, .{ 6, 0, 6 });
+        try expectNextTokenEqualDeep(&it, .minus_rarrow, .{ 6, 0, 6 }, .{ 8, 0, 8 });
+        try expectNextTokenEqualDeep(&it, .dot, .{ 8, 0, 8 }, .{ 9, 0, 9 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "b" }, .{ 9, 0, 9 }, .{ 10, 0, 10 });
         try expectNextTokenNull(&it);
     }
 
     {
         var stream = std.io.fixedBufferStream("access provider apname { issuer 'url' }");
-        var it = TokenIterator.init(stream.reader().any());
-        try expectNextTokenEqualDeep(&it, 0, 6, .{ .word = "access" });
-        try expectNextTokenEqualDeep(&it, 0, 15, .{ .word = "provider" });
-        try expectNextTokenEqualDeep(&it, 0, 22, .{ .word = "apname" });
-        try expectNextTokenEqualDeep(&it, 0, 24, .lbrace);
-        try expectNextTokenEqualDeep(&it, 0, 31, .{ .word = "issuer" });
-        try expectNextTokenEqualDeep(&it, 0, 37, .{ .string = "'url'" });
-        try expectNextTokenEqualDeep(&it, 0, 39, .rbrace);
+        var it = TokenIterator.init(stream.reader().any(), null);
+        try expectNextTokenEqualDeep(&it, .{ .word = "access" }, .{ 0, 0, 0 }, .{ 6, 0, 6 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "provider" }, .{ 7, 0, 7 }, .{ 15, 0, 15 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "apname" }, .{ 16, 0, 16 }, .{ 22, 0, 22 });
+        try expectNextTokenEqualDeep(&it, .lbrace, .{ 23, 0, 23 }, .{ 24, 0, 24 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "issuer" }, .{ 25, 0, 25 }, .{ 31, 0, 31 });
+        try expectNextTokenEqualDeep(&it, .{ .string = "'url'" }, .{ 32, 0, 32 }, .{ 37, 0, 37 });
+        try expectNextTokenEqualDeep(&it, .rbrace, .{ 38, 0, 38 }, .{ 39, 0, 39 });
         try expectNextTokenNull(&it);
     }
 
     {
         var stream = std.io.fixedBufferStream("some words /* wrapping around a */ comment block");
-        var it = TokenIterator.init(stream.reader().any());
-        try expectNextTokenEqualDeep(&it, 0, 4, .{ .word = "some" });
-        try expectNextTokenEqualDeep(&it, 0, 10, .{ .word = "words" });
-        try expectNextTokenEqualDeep(&it, 0, 34, .{ .comment_block = "/* wrapping around a */" });
-        try expectNextTokenEqualDeep(&it, 0, 42, .{ .word = "comment" });
-        try expectNextTokenEqualDeep(&it, 0, 48, .{ .word = "block" });
+        var it = TokenIterator.init(stream.reader().any(), null);
+        try expectNextTokenEqualDeep(&it, .{ .word = "some" }, .{ 0, 0, 0 }, .{ 4, 0, 4 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "words" }, .{ 5, 0, 5 }, .{ 10, 0, 10 });
+        try expectNextTokenEqualDeep(&it, .{ .comment_block = "/* wrapping around a */" }, .{ 11, 0, 11 }, .{ 34, 0, 34 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "comment" }, .{ 35, 0, 35 }, .{ 42, 0, 42 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "block" }, .{ 43, 0, 43 }, .{ 48, 0, 48 });
         try expectNextTokenNull(&it);
     }
 
@@ -649,44 +684,57 @@ test "read token" {
             \\3 // 3
             \\1.5 // 1.5
             \\3.14e5 // 314000
+            \\
         );
-        var it = TokenIterator.init(stream.reader().any());
-        try expectNextTokenEqualDeep(&it, 1, 0, .{ .comment_line = "// Single-line comments start with double-slash." });
-        try expectNextTokenEqualDeep(&it, 4, 2, .{ .comment_block = "/*\n  Block comments start with slash-asterisk\n  and end with asterisk-slash.\n*/" });
-        try expectNextTokenEqualDeep(&it, 6, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 7, 0, .{ .comment_line = "// Statements don't have to be terminated by ; ..." });
-        try expectNextTokenEqualDeep(&it, 7, 1, .lparen);
-        try expectNextTokenEqualDeep(&it, 7, 2, .{ .number = "1" });
-        try expectNextTokenEqualDeep(&it, 7, 4, .plus);
-        try expectNextTokenEqualDeep(&it, 7, 6, .{ .number = "3" });
-        try expectNextTokenEqualDeep(&it, 7, 7, .rparen);
-        try expectNextTokenEqualDeep(&it, 7, 9, .asterisk);
-        try expectNextTokenEqualDeep(&it, 7, 11, .{ .number = "2" });
-        try expectNextTokenEqualDeep(&it, 9, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 10, 0, .{ .comment_line = "// ... but can be." });
-        try expectNextTokenEqualDeep(&it, 10, 1, .lparen);
-        try expectNextTokenEqualDeep(&it, 10, 2, .{ .number = "1" });
-        try expectNextTokenEqualDeep(&it, 10, 4, .plus);
-        try expectNextTokenEqualDeep(&it, 10, 6, .{ .number = "3" });
-        try expectNextTokenEqualDeep(&it, 10, 7, .rparen);
-        try expectNextTokenEqualDeep(&it, 10, 9, .asterisk);
-        try expectNextTokenEqualDeep(&it, 10, 11, .{ .number = "2" });
-        try expectNextTokenEqualDeep(&it, 10, 12, .semi);
-        try expectNextTokenEqualDeep(&it, 12, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 13, 0, .{ .comment_line = "/////////////////////////////////////////////" });
-        try expectNextTokenEqualDeep(&it, 14, 0, .{ .comment_line = "// Numbers, Strings, and Operators" });
-        try expectNextTokenEqualDeep(&it, 15, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 16, 0, .{ .comment_line = "// FQL has integer, decimal, and exponential values stored as" });
-        try expectNextTokenEqualDeep(&it, 17, 0, .{ .comment_line = "// Int, Long, or Double types, which are all Number types." });
-        try expectNextTokenEqualDeep(&it, 18, 0, .{ .comment_line = "// An Int is a signed 32-bit integer type." });
-        try expectNextTokenEqualDeep(&it, 19, 0, .{ .comment_line = "// A Long is a signed 64-bit integer type." });
-        try expectNextTokenEqualDeep(&it, 20, 0, .{ .comment_line = "// Doubles are double-precision, 64-bit binary type, IEEE 754-2019." });
-        try expectNextTokenEqualDeep(&it, 20, 1, .{ .number = "3" });
-        try expectNextTokenEqualDeep(&it, 21, 0, .{ .comment_line = "// 3" });
-        try expectNextTokenEqualDeep(&it, 21, 3, .{ .number = "1.5" });
-        try expectNextTokenEqualDeep(&it, 22, 0, .{ .comment_line = "// 1.5" });
-        try expectNextTokenEqualDeep(&it, 22, 6, .{ .number = "3.14e5" });
-        try expectNextTokenEqualDeep(&it, 22, 16, .{ .comment_line = "// 314000" });
+        var it = TokenIterator.init(stream.reader().any(), null);
+        try expectNextTokenEqualDeep(&it, .{ .comment_line = "// Single-line comments start with double-slash." }, .{ 0, 0, 0 }, .{ 48, 0, 48 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 48, 0, 48 }, .{ 49, 1, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .comment_block = "/*\n  Block comments start with slash-asterisk\n  and end with asterisk-slash.\n*/" }, .{ 49, 1, 0 }, .{ 128, 4, 2 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 128, 4, 2 }, .{ 130, 6, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .comment_line = "// Statements don't have to be terminated by ; ..." }, .{ 130, 6, 0 }, .{ 180, 6, 50 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 180, 6, 50 }, .{ 181, 7, 0 });
+        try expectNextTokenEqualDeep(&it, .lparen, .{ 181, 7, 0 }, .{ 182, 7, 1 });
+        try expectNextTokenEqualDeep(&it, .{ .number = "1" }, .{ 182, 7, 1 }, .{ 183, 7, 2 });
+        try expectNextTokenEqualDeep(&it, .plus, .{ 184, 7, 3 }, .{ 185, 7, 4 });
+        try expectNextTokenEqualDeep(&it, .{ .number = "3" }, .{ 186, 7, 5 }, .{ 187, 7, 6 });
+        try expectNextTokenEqualDeep(&it, .rparen, .{ 187, 7, 6 }, .{ 188, 7, 7 });
+        try expectNextTokenEqualDeep(&it, .asterisk, .{ 189, 7, 8 }, .{ 190, 7, 9 });
+        try expectNextTokenEqualDeep(&it, .{ .number = "2" }, .{ 191, 7, 10 }, .{ 192, 7, 11 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 192, 7, 11 }, .{ 194, 9, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .comment_line = "// ... but can be." }, .{ 194, 9, 0 }, .{ 212, 9, 18 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 212, 9, 18 }, .{ 213, 10, 0 });
+        try expectNextTokenEqualDeep(&it, .lparen, .{ 213, 10, 0 }, .{ 214, 10, 1 });
+        try expectNextTokenEqualDeep(&it, .{ .number = "1" }, .{ 214, 10, 1 }, .{ 215, 10, 2 });
+        try expectNextTokenEqualDeep(&it, .plus, .{ 216, 10, 3 }, .{ 217, 10, 4 });
+        try expectNextTokenEqualDeep(&it, .{ .number = "3" }, .{ 218, 10, 5 }, .{ 219, 10, 6 });
+        try expectNextTokenEqualDeep(&it, .rparen, .{ 219, 10, 6 }, .{ 220, 10, 7 });
+        try expectNextTokenEqualDeep(&it, .asterisk, .{ 221, 10, 8 }, .{ 222, 10, 9 });
+        try expectNextTokenEqualDeep(&it, .{ .number = "2" }, .{ 223, 10, 10 }, .{ 224, 10, 11 });
+        try expectNextTokenEqualDeep(&it, .semi, .{ 224, 10, 11 }, .{ 225, 10, 12 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 225, 10, 12 }, .{ 227, 12, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .comment_line = "/////////////////////////////////////////////" }, .{ 227, 12, 0 }, .{ 272, 12, 45 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 272, 12, 45 }, .{ 273, 13, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .comment_line = "// Numbers, Strings, and Operators" }, .{ 273, 13, 0 }, .{ 307, 13, 34 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 307, 13, 34 }, .{ 309, 15, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .comment_line = "// FQL has integer, decimal, and exponential values stored as" }, .{ 309, 15, 0 }, .{ 370, 15, 61 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 370, 15, 61 }, .{ 371, 16, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .comment_line = "// Int, Long, or Double types, which are all Number types." }, .{ 371, 16, 0 }, .{ 429, 16, 58 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 429, 16, 58 }, .{ 430, 17, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .comment_line = "// An Int is a signed 32-bit integer type." }, .{ 430, 17, 0 }, .{ 472, 17, 42 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 472, 17, 42 }, .{ 473, 18, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .comment_line = "// A Long is a signed 64-bit integer type." }, .{ 473, 18, 0 }, .{ 515, 18, 42 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 515, 18, 42 }, .{ 516, 19, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .comment_line = "// Doubles are double-precision, 64-bit binary type, IEEE 754-2019." }, .{ 516, 19, 0 }, .{ 583, 19, 67 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 583, 19, 67 }, .{ 584, 20, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .number = "3" }, .{ 584, 20, 0 }, .{ 585, 20, 1 });
+        try expectNextTokenEqualDeep(&it, .{ .comment_line = "// 3" }, .{ 586, 20, 2 }, .{ 590, 20, 6 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 590, 20, 6 }, .{ 591, 21, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .number = "1.5" }, .{ 591, 21, 0 }, .{ 594, 21, 3 });
+        try expectNextTokenEqualDeep(&it, .{ .comment_line = "// 1.5" }, .{ 595, 21, 4 }, .{ 601, 21, 10 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 601, 21, 10 }, .{ 602, 22, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .number = "3.14e5" }, .{ 602, 22, 0 }, .{ 608, 22, 6 });
+        try expectNextTokenEqualDeep(&it, .{ .comment_line = "// 314000" }, .{ 609, 22, 7 }, .{ 618, 22, 16 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 618, 22, 16 }, .{ 619, 23, 0 });
         try expectNextTokenNull(&it);
     }
 
@@ -709,90 +757,90 @@ test "read token" {
             \\  })
             \\}
         );
-        var it = TokenIterator.init(stream.reader().any());
-        try expectNextTokenEqualDeep(&it, 0, 5, .{ .annotation = "role" });
-        try expectNextTokenEqualDeep(&it, 0, 6, .lparen);
-        try expectNextTokenEqualDeep(&it, 0, 12, .{ .word = "server" });
-        try expectNextTokenEqualDeep(&it, 0, 13, .rparen);
-        try expectNextTokenEqualDeep(&it, 1, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 1, 8, .{ .word = "function" });
-        try expectNextTokenEqualDeep(&it, 1, 20, .{ .word = "submitOrder" });
-        try expectNextTokenEqualDeep(&it, 1, 21, .lparen);
-        try expectNextTokenEqualDeep(&it, 1, 29, .{ .word = "customer" });
-        try expectNextTokenEqualDeep(&it, 1, 30, .comma);
-        try expectNextTokenEqualDeep(&it, 1, 48, .{ .word = "productsRequested" });
-        try expectNextTokenEqualDeep(&it, 1, 49, .rparen);
-        try expectNextTokenEqualDeep(&it, 1, 51, .lbrace);
-        try expectNextTokenEqualDeep(&it, 2, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 2, 4, .{ .word = "if" });
-        try expectNextTokenEqualDeep(&it, 2, 6, .lparen);
-        try expectNextTokenEqualDeep(&it, 2, 23, .{ .word = "productsRequested" });
-        try expectNextTokenEqualDeep(&it, 2, 24, .dot);
-        try expectNextTokenEqualDeep(&it, 2, 30, .{ .word = "length" });
-        try expectNextTokenEqualDeep(&it, 2, 33, .equal2);
-        try expectNextTokenEqualDeep(&it, 2, 35, .{ .number = "0" });
-        try expectNextTokenEqualDeep(&it, 2, 36, .rparen);
-        try expectNextTokenEqualDeep(&it, 2, 38, .lbrace);
-        try expectNextTokenEqualDeep(&it, 3, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 3, 9, .{ .word = "abort" });
-        try expectNextTokenEqualDeep(&it, 3, 10, .lparen);
-        try expectNextTokenEqualDeep(&it, 3, 31, .{ .string = "\"Cart can't be empty\"" });
-        try expectNextTokenEqualDeep(&it, 3, 32, .rparen);
-        try expectNextTokenEqualDeep(&it, 4, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 4, 3, .rbrace);
-        try expectNextTokenEqualDeep(&it, 6, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 6, 7, .{ .word = "Order" });
-        try expectNextTokenEqualDeep(&it, 6, 8, .dot);
-        try expectNextTokenEqualDeep(&it, 6, 14, .{ .word = "create" });
-        try expectNextTokenEqualDeep(&it, 6, 15, .lparen);
-        try expectNextTokenEqualDeep(&it, 6, 16, .lbrace);
-        try expectNextTokenEqualDeep(&it, 7, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 7, 12, .{ .word = "customer" });
-        try expectNextTokenEqualDeep(&it, 7, 13, .colon);
-        try expectNextTokenEqualDeep(&it, 7, 22, .{ .word = "customer" });
-        try expectNextTokenEqualDeep(&it, 7, 23, .comma);
-        try expectNextTokenEqualDeep(&it, 8, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 8, 8, .{ .word = "cart" });
-        try expectNextTokenEqualDeep(&it, 8, 9, .colon);
-        try expectNextTokenEqualDeep(&it, 8, 22, .{ .word = "shoppingCart" });
-        try expectNextTokenEqualDeep(&it, 8, 23, .comma);
-        try expectNextTokenEqualDeep(&it, 9, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 9, 10, .{ .word = "status" });
-        try expectNextTokenEqualDeep(&it, 9, 11, .colon);
-        try expectNextTokenEqualDeep(&it, 9, 24, .{ .string = "\"processing\"" });
-        try expectNextTokenEqualDeep(&it, 9, 25, .comma);
-        try expectNextTokenEqualDeep(&it, 10, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 10, 16, .{ .word = "creationDate" });
-        try expectNextTokenEqualDeep(&it, 10, 17, .colon);
-        try expectNextTokenEqualDeep(&it, 10, 22, .{ .word = "Time" });
-        try expectNextTokenEqualDeep(&it, 10, 23, .dot);
-        try expectNextTokenEqualDeep(&it, 10, 26, .{ .word = "now" });
-        try expectNextTokenEqualDeep(&it, 10, 27, .lparen);
-        try expectNextTokenEqualDeep(&it, 10, 28, .rparen);
-        try expectNextTokenEqualDeep(&it, 10, 29, .comma);
-        try expectNextTokenEqualDeep(&it, 11, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 11, 12, .{ .word = "shipDate" });
-        try expectNextTokenEqualDeep(&it, 11, 13, .colon);
-        try expectNextTokenEqualDeep(&it, 11, 18, .{ .word = "null" });
-        try expectNextTokenEqualDeep(&it, 11, 19, .comma);
-        try expectNextTokenEqualDeep(&it, 12, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 12, 19, .{ .word = "deliveryAddress" });
-        try expectNextTokenEqualDeep(&it, 12, 20, .colon);
-        try expectNextTokenEqualDeep(&it, 12, 29, .{ .word = "customer" });
-        try expectNextTokenEqualDeep(&it, 12, 30, .dot);
-        try expectNextTokenEqualDeep(&it, 12, 37, .{ .word = "address" });
-        try expectNextTokenEqualDeep(&it, 12, 38, .comma);
-        try expectNextTokenEqualDeep(&it, 13, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 13, 14, .{ .word = "creditCard" });
-        try expectNextTokenEqualDeep(&it, 13, 15, .colon);
-        try expectNextTokenEqualDeep(&it, 13, 24, .{ .word = "customer" });
-        try expectNextTokenEqualDeep(&it, 13, 25, .dot);
-        try expectNextTokenEqualDeep(&it, 13, 35, .{ .word = "creditCard" });
-        try expectNextTokenEqualDeep(&it, 14, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 14, 3, .rbrace);
-        try expectNextTokenEqualDeep(&it, 14, 4, .rparen);
-        try expectNextTokenEqualDeep(&it, 15, 0, .eol);
-        try expectNextTokenEqualDeep(&it, 15, 1, .rbrace);
+        var it = TokenIterator.init(stream.reader().any(), null);
+        try expectNextTokenEqualDeep(&it, .{ .annotation = "role" }, .{ 0, 0, 0 }, .{ 5, 0, 5 });
+        try expectNextTokenEqualDeep(&it, .lparen, .{ 5, 0, 5 }, .{ 6, 0, 6 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "server" }, .{ 6, 0, 6 }, .{ 12, 0, 12 });
+        try expectNextTokenEqualDeep(&it, .rparen, .{ 12, 0, 12 }, .{ 13, 0, 13 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 13, 0, 13 }, .{ 14, 1, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "function" }, .{ 14, 1, 0 }, .{ 22, 1, 8 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "submitOrder" }, .{ 23, 1, 9 }, .{ 34, 1, 20 });
+        try expectNextTokenEqualDeep(&it, .lparen, .{ 34, 1, 20 }, .{ 35, 1, 21 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "customer" }, .{ 35, 1, 21 }, .{ 43, 1, 29 });
+        try expectNextTokenEqualDeep(&it, .comma, .{ 43, 1, 29 }, .{ 44, 1, 30 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "productsRequested" }, .{ 45, 1, 31 }, .{ 62, 1, 48 });
+        try expectNextTokenEqualDeep(&it, .rparen, .{ 62, 1, 48 }, .{ 63, 1, 49 });
+        try expectNextTokenEqualDeep(&it, .lbrace, .{ 64, 1, 50 }, .{ 65, 1, 51 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 65, 1, 51 }, .{ 66, 2, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "if" }, .{ 68, 2, 2 }, .{ 70, 2, 4 });
+        try expectNextTokenEqualDeep(&it, .lparen, .{ 71, 2, 5 }, .{ 72, 2, 6 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "productsRequested" }, .{ 72, 2, 6 }, .{ 89, 2, 23 });
+        try expectNextTokenEqualDeep(&it, .dot, .{ 89, 2, 23 }, .{ 90, 2, 24 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "length" }, .{ 90, 2, 24 }, .{ 96, 2, 30 });
+        try expectNextTokenEqualDeep(&it, .equal2, .{ 97, 2, 31 }, .{ 99, 2, 33 });
+        try expectNextTokenEqualDeep(&it, .{ .number = "0" }, .{ 100, 2, 34 }, .{ 101, 2, 35 });
+        try expectNextTokenEqualDeep(&it, .rparen, .{ 101, 2, 35 }, .{ 102, 2, 36 });
+        try expectNextTokenEqualDeep(&it, .lbrace, .{ 103, 2, 37 }, .{ 104, 2, 38 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 104, 2, 38 }, .{ 105, 3, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "abort" }, .{ 109, 3, 4 }, .{ 114, 3, 9 });
+        try expectNextTokenEqualDeep(&it, .lparen, .{ 114, 3, 9 }, .{ 115, 3, 10 });
+        try expectNextTokenEqualDeep(&it, .{ .string = "\"Cart can't be empty\"" }, .{ 115, 3, 10 }, .{ 136, 3, 31 });
+        try expectNextTokenEqualDeep(&it, .rparen, .{ 136, 3, 31 }, .{ 137, 3, 32 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 137, 3, 32 }, .{ 138, 4, 0 });
+        try expectNextTokenEqualDeep(&it, .rbrace, .{ 140, 4, 2 }, .{ 141, 4, 3 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 141, 4, 3 }, .{ 143, 6, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "Order" }, .{ 145, 6, 2 }, .{ 150, 6, 7 });
+        try expectNextTokenEqualDeep(&it, .dot, .{ 150, 6, 7 }, .{ 151, 6, 8 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "create" }, .{ 151, 6, 8 }, .{ 157, 6, 14 });
+        try expectNextTokenEqualDeep(&it, .lparen, .{ 157, 6, 14 }, .{ 158, 6, 15 });
+        try expectNextTokenEqualDeep(&it, .lbrace, .{ 158, 6, 15 }, .{ 159, 6, 16 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 159, 6, 16 }, .{ 160, 7, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "customer" }, .{ 164, 7, 4 }, .{ 172, 7, 12 });
+        try expectNextTokenEqualDeep(&it, .colon, .{ 172, 7, 12 }, .{ 173, 7, 13 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "customer" }, .{ 174, 7, 14 }, .{ 182, 7, 22 });
+        try expectNextTokenEqualDeep(&it, .comma, .{ 182, 7, 22 }, .{ 183, 7, 23 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 183, 7, 23 }, .{ 184, 8, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "cart" }, .{ 188, 8, 4 }, .{ 192, 8, 8 });
+        try expectNextTokenEqualDeep(&it, .colon, .{ 192, 8, 8 }, .{ 193, 8, 9 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "shoppingCart" }, .{ 194, 8, 10 }, .{ 206, 8, 22 });
+        try expectNextTokenEqualDeep(&it, .comma, .{ 206, 8, 22 }, .{ 207, 8, 23 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 207, 8, 23 }, .{ 208, 9, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "status" }, .{ 212, 9, 4 }, .{ 218, 9, 10 });
+        try expectNextTokenEqualDeep(&it, .colon, .{ 218, 9, 10 }, .{ 219, 9, 11 });
+        try expectNextTokenEqualDeep(&it, .{ .string = "\"processing\"" }, .{ 220, 9, 12 }, .{ 232, 9, 24 });
+        try expectNextTokenEqualDeep(&it, .comma, .{ 232, 9, 24 }, .{ 233, 9, 25 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 233, 9, 25 }, .{ 234, 10, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "creationDate" }, .{ 238, 10, 4 }, .{ 250, 10, 16 });
+        try expectNextTokenEqualDeep(&it, .colon, .{ 250, 10, 16 }, .{ 251, 10, 17 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "Time" }, .{ 252, 10, 18 }, .{ 256, 10, 22 });
+        try expectNextTokenEqualDeep(&it, .dot, .{ 256, 10, 22 }, .{ 257, 10, 23 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "now" }, .{ 257, 10, 23 }, .{ 260, 10, 26 });
+        try expectNextTokenEqualDeep(&it, .lparen, .{ 260, 10, 26 }, .{ 261, 10, 27 });
+        try expectNextTokenEqualDeep(&it, .rparen, .{ 261, 10, 27 }, .{ 262, 10, 28 });
+        try expectNextTokenEqualDeep(&it, .comma, .{ 262, 10, 28 }, .{ 263, 10, 29 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 263, 10, 29 }, .{ 264, 11, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "shipDate" }, .{ 268, 11, 4 }, .{ 276, 11, 12 });
+        try expectNextTokenEqualDeep(&it, .colon, .{ 276, 11, 12 }, .{ 277, 11, 13 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "null" }, .{ 278, 11, 14 }, .{ 282, 11, 18 });
+        try expectNextTokenEqualDeep(&it, .comma, .{ 282, 11, 18 }, .{ 283, 11, 19 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 283, 11, 19 }, .{ 284, 12, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "deliveryAddress" }, .{ 288, 12, 4 }, .{ 303, 12, 19 });
+        try expectNextTokenEqualDeep(&it, .colon, .{ 303, 12, 19 }, .{ 304, 12, 20 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "customer" }, .{ 305, 12, 21 }, .{ 313, 12, 29 });
+        try expectNextTokenEqualDeep(&it, .dot, .{ 313, 12, 29 }, .{ 314, 12, 30 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "address" }, .{ 314, 12, 30 }, .{ 321, 12, 37 });
+        try expectNextTokenEqualDeep(&it, .comma, .{ 321, 12, 37 }, .{ 322, 12, 38 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 322, 12, 38 }, .{ 323, 13, 0 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "creditCard" }, .{ 327, 13, 4 }, .{ 337, 13, 14 });
+        try expectNextTokenEqualDeep(&it, .colon, .{ 337, 13, 14 }, .{ 338, 13, 15 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "customer" }, .{ 339, 13, 16 }, .{ 347, 13, 24 });
+        try expectNextTokenEqualDeep(&it, .dot, .{ 347, 13, 24 }, .{ 348, 13, 25 });
+        try expectNextTokenEqualDeep(&it, .{ .word = "creditCard" }, .{ 348, 13, 25 }, .{ 358, 13, 35 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 358, 13, 35 }, .{ 359, 14, 0 });
+        try expectNextTokenEqualDeep(&it, .rbrace, .{ 361, 14, 2 }, .{ 362, 14, 3 });
+        try expectNextTokenEqualDeep(&it, .rparen, .{ 362, 14, 3 }, .{ 363, 14, 4 });
+        try expectNextTokenEqualDeep(&it, .eol, .{ 363, 14, 4 }, .{ 364, 15, 0 });
+        try expectNextTokenEqualDeep(&it, .rbrace, .{ 364, 15, 0 }, .{ 365, 15, 1 });
         try expectNextTokenNull(&it);
     }
 }

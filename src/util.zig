@@ -122,3 +122,23 @@ pub const mem = struct {
         return ptr;
     }
 };
+
+/// https://docs.fauna.com/fauna/current/reference/fql_reference/lexical#whitespace
+pub fn isWhitespace(char: u8) bool {
+    // character tab            : u+0009
+    // line tab                 : u+000B
+    // form feed                : u+000C
+    // space                    : u+0020
+    // no-break space           : u+00A0
+    // zero-width no-break space: u+feff (unhandled)
+    return char == '\x09' or char == '\x0B' or char == '\x0C' or char == '\x20' or char == '\xA0';
+}
+
+/// https://docs.fauna.com/fauna/current/reference/fql_reference/lexical#line-terminators
+pub fn isLineTerminator(char: u8) bool {
+    // line-feed          : u+000A
+    // carriage return    : u+000D
+    // line separator     : u+2028 (unhandled)
+    // paragraph separator: u+2029 (unhandled)
+    return char == '\x0A' or char == '\x0D';
+}

@@ -4,11 +4,18 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    _ = b.addModule("root", .{
+    const sourcemap = b.dependency("sourcemap", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("sourcemap");
+
+    const root = b.addModule("root", .{
         .root_source_file = b.path("src/root.zig"),
         .optimize = optimize,
         .target = target,
     });
+
+    root.addImport("sourcemap", sourcemap);
 
     const exe = b.addExecutable(.{
         .name = "canonicalfql",
@@ -18,6 +25,8 @@ pub fn build(b: *std.Build) void {
     });
 
     b.installArtifact(exe);
+
+    exe.root_module.addImport("sourcemap", sourcemap);
 
     const run_cmd = b.addRunArtifact(exe);
 
@@ -38,6 +47,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .filters = test_filters,
     });
+
+    lib_unit_tests.root_module.addImport("sourcemap", sourcemap);
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
