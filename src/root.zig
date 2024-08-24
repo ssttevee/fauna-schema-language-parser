@@ -208,4 +208,98 @@ pub const SchemaTree = struct {
             }
         }
     }
+
+    pub const PredicateWalker = struct {
+        decls: []const SchemaDefinition,
+        i: usize = 0,
+        j: usize = 0,
+        k: usize = 0,
+
+        pub fn next(self: *PredicateWalker) ?*const FQLExpression {
+            while (self.i < self.decls.len) : (self.i += 1) {
+                switch (self.decls[self.i]) {
+                    .access_provider => |ap| {
+                        if (ap.members) |members| {
+                            while (self.j < members.len) {
+                                defer self.j += 1;
+
+                                if (members[self.j] == .role) {
+                                    if (members[self.j].role.predicate) |*predicate| {
+                                        return predicate;
+                                    }
+                                }
+                            } else {
+                                self.j = 0;
+                            }
+                        }
+                    },
+                    .collection => |col| {
+                        if (col.members) |members| {
+                            while (self.j < members.len) {
+                                defer self.j += 1;
+
+                                switch (members[self.j]) {
+                                    .field => |*field| {
+                                        if (field.default) |*expr| {
+                                            return expr;
+                                        }
+                                    },
+                                    .computed_field => |*field| {
+                                        return &field.function;
+                                    },
+                                    .check_constraint => |*check| {
+                                        return &check.predicate;
+                                    },
+                                    else => {},
+                                }
+                            } else {
+                                self.j = 0;
+                            }
+                        }
+                    },
+                    .role => |role| {
+                        if (role.members) |members| {
+                            while (self.j < members.len) {
+                                defer self.j += 1;
+
+                                switch (members[self.j]) {
+                                    .membership => |*membership| {
+                                        if (membership.predicate) |*predicate| {
+                                            return predicate;
+                                        }
+                                    },
+                                    .privileges => |privileges| {
+                                        if (privileges.actions) |actions| {
+                                            while (self.k < actions.len) {
+                                                defer self.k += 1;
+
+                                                if (actions[self.k].predicate) |*predicate| {
+                                                    return predicate;
+                                                }
+                                            } else {
+                                                self.k = 0;
+                                            }
+                                        }
+                                    },
+                                }
+                            } else {
+                                self.j = 0;
+                            }
+                        }
+                    },
+                    else => {},
+                }
+            }
+
+            return null;
+        }
+    };
+
+    pub fn walkPredicates(self: SchemaTree) ?PredicateWalker {
+        if (self.declarations) |decls| {
+            return .{ .decls = decls };
+        }
+
+        return null;
+    }
 };
