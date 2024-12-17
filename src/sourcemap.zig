@@ -279,7 +279,7 @@ pub fn setNextWriteMapping(writer: anytype, source: ?[]const u8, position: Posit
         return writer.context.addMapping(source, position, name);
     }
 
-    if (@hasField(@TypeOf(writer), "writeFn") and writer.writeFn == SourceMapWriter.anyWriteFn) {
+    if (@TypeOf(writer) == std.io.AnyWriter and writer.writeFn == SourceMapWriter.anyWriteFn) {
         return @as(*const SourceMapWriter, @alignCast(@ptrCast(writer.context))).addMapping(source, position, name);
     }
 }
