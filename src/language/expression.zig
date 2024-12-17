@@ -2227,6 +2227,11 @@ pub const FQLExpression = union(enum) {
                 start_position: Position,
             };
 
+            const EndOfExpression = struct {
+                expression: FQLExpression,
+                eol: bool = false,
+            };
+
             empty,
             after_lbrace: AfterLBrace,
             after_identifier: TextNode,
@@ -2243,12 +2248,13 @@ pub const FQLExpression = union(enum) {
             block_scope: State.BlockScope,
             long_function: LongFunction,
             short_function: ShortFunction,
-            end: FQLExpression,
+            end: EndOfExpression,
 
             fn deinit(self: @This(), allocator: std.mem.Allocator) void {
                 // std.debug.print("deinit FQLExpression.Parser.Unmanaged.State.{s}\n", .{@tagName(self)});
                 switch (self) {
                     .empty, .unary_operation => {},
+                    .end => |end| end.expression.deinit(allocator),
                     inline else => |v| v.deinit(allocator),
                 }
             }
@@ -2271,7 +2277,7 @@ pub const FQLExpression = union(enum) {
         }
 
         inline fn finalizeExpr(self: *@This(), expr: FQLExpression) void {
-            self.state = .{ .end = expr };
+            self.state = .{ .end = .{ .expression = expr } };
         }
 
         pub const PushResult = struct {
@@ -2508,6 +2514,7 @@ pub const FQLExpression = union(enum) {
                         },
                     },
                     .after_condition => |after_condition| switch (token) {
+                        .eol => {},
                         .rparen => {
                             conditional.state = .{
                                 .after_rparen = .{
@@ -2603,6 +2610,7 @@ pub const FQLExpression = union(enum) {
                     },
                 },
                 .field_access => |*field_access| switch (token) {
+                    .eol => {},
                     .word => |word| {
                         self.finalizeExpr(.{
                             .field_access = .{
@@ -2952,7 +2960,8 @@ pub const FQLExpression = union(enum) {
                         },
                     }
                 },
-                .end => |expr| {
+                .end => |*end| {
+                    const expr = end.expression;
                     switch (token) {
                         .dot, .question_dot => {
                             self.state = .{
@@ -3068,11 +3077,11 @@ pub const FQLExpression = union(enum) {
                         },
                     }
 
-                    if (token == .eol) {
-                        return .{};
-                    }
-
                     if (self.parent) |parent| {
+                        if (parent.state == .invocation and token == .eol) {
+                            return .{};
+                        }
+
                         defer allocator.destroy(parent);
                         defer self.* = parent.*;
 
@@ -3137,6 +3146,9 @@ pub const FQLExpression = union(enum) {
                                 try array_literal.elements.append(allocator, expr);
                             },
                             .invocation => |*invocation| switch (token) {
+                                .eol => {
+                                    return .{};
+                                },
                                 .comma => {
                                     try invocation.comma_positions.append(allocator, loc.start);
                                     try invocation.arguments.append(allocator, expr);
@@ -3162,7 +3174,7 @@ pub const FQLExpression = union(enum) {
                                     return .{};
                                 },
                                 else => {
-                                    std.log.err("unexpected token: expected rparen but got {s}", .{@tagName(token)});
+                                    std.log.err("unexpected token: expected rparen or comma but got {s}", .{@tagName(token)});
                                     return error.UnexpectedToken;
                                 },
                             },
@@ -3354,6 +3366,11 @@ pub const FQLExpression = union(enum) {
 
                         // ensure token is not consumed at this point
                         return .{ .save = token_with_location };
+                    }
+
+                    if (token == .eol) {
+                        end.eol = true;
+                        return .{};
                     }
 
                     self.* = .{};
