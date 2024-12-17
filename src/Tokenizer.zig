@@ -582,12 +582,12 @@ fn expectNextTokenEqualDeep(it: *TokenIterator, expected: Token, start: [3]u64, 
     defer token.deinit(testing.allocator);
 
     try testing.expectEqualDeep(expected, token.token);
-    try testing.expectEqual(start[0], token.location.start.offset);
-    try testing.expectEqual(start[1], token.location.start.line);
-    try testing.expectEqual(start[2], token.location.start.column);
-    try testing.expectEqual(end[0], token.location.end.offset);
-    try testing.expectEqual(end[1], token.location.end.line);
-    try testing.expectEqual(end[2], token.location.end.column);
+    try testing.expectEqual(start[0], token.location.?.start.offset);
+    try testing.expectEqual(start[1], token.location.?.start.line);
+    try testing.expectEqual(start[2], token.location.?.start.column);
+    try testing.expectEqual(end[0], token.location.?.end.offset);
+    try testing.expectEqual(end[1], token.location.?.end.line);
+    try testing.expectEqual(end[2], token.location.?.end.column);
 }
 
 test "read token" {

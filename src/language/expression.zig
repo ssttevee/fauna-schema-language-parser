@@ -3442,9 +3442,8 @@ pub const FQLExpression = union(enum) {
 
 pub const parseExpression = FQLExpression.Parser.parseReader;
 
-fn expectParsedExprEqual(str: []const u8, expected: FQLExpression) !void {
-    var stream = std.io.fixedBufferStream(str);
-    var actual = (try parseExpression(testing.allocator, stream.reader().any(), null)).?;
+fn expectParsedExprEqualMaybeCanonical(str: []const u8, expected: FQLExpression, canonical: bool) !void {
+    var actual = (try FQLExpression.Parser.parseString(testing.allocator, str, null)).?;
     defer actual.deinit(testing.allocator);
 
     // std.debug.print("actual: {any}\n", .{actual});
@@ -3454,12 +3453,22 @@ fn expectParsedExprEqual(str: []const u8, expected: FQLExpression) !void {
     const canonical_string = try actual.toCanonicalString(testing.allocator);
     defer testing.allocator.free(canonical_string);
 
-    try testing.expectEqualStrings(str, canonical_string);
+    if (canonical) {
+        try testing.expectEqualStrings(str, canonical_string);
+    }
 
     try parsing.checkForLeaks(FQLExpression.Parser, str);
 
     try parsing.testDupe(expected);
     try parsing.testDupe(actual);
+}
+
+fn expectParsedExprEqual(str: []const u8, expected: FQLExpression) !void {
+    try expectParsedExprEqualMaybeCanonical(str, expected, true);
+}
+
+fn expectParsedExprEqualNonCanonical(str: []const u8, expected: FQLExpression) !void {
+    try expectParsedExprEqualMaybeCanonical(str, expected, false);
 }
 
 test parseExpression {
@@ -5430,6 +5439,191 @@ test parseExpression {
     });
 
     try expectParsedExprEqual(
+        \\{
+        \\    let foo = "bar"
+        \\    let bar = foo
+        \\    {
+        \\        bar
+        \\    }
+        \\}
+    , .{
+        .block_scope = .{
+            .statements = &[_]FQLExpression{
+                .{
+                    .variable_declaration = .{
+                        .name = .{
+                            .text = "foo",
+                            .location = .{
+                                .start = .{ .offset = 10, .line = 1, .column = 8 },
+                                .end = .{ .offset = 13, .line = 1, .column = 11 },
+                            },
+                        },
+                        .value = &FQLExpression{
+                            .string_literal = .{
+                                .text = "\"bar\"",
+                                .location = .{
+                                    .start = .{ .offset = 16, .line = 1, .column = 14 },
+                                    .end = .{ .offset = 21, .line = 1, .column = 19 },
+                                },
+                            },
+                        },
+                        .location = .{
+                            .start = .{ .offset = 6, .line = 1, .column = 4 },
+                            .end = .{ .offset = 21, .line = 1, .column = 19 },
+                        },
+                        .equal_position = .{ .offset = 14, .line = 1, .column = 12 },
+                    },
+                },
+                .{
+                    .variable_declaration = .{
+                        .name = .{
+                            .text = "bar",
+                            .location = .{
+                                .start = .{ .offset = 30, .line = 2, .column = 8 },
+                                .end = .{ .offset = 33, .line = 2, .column = 11 },
+                            },
+                        },
+                        .value = &FQLExpression{
+                            .identifier = .{
+                                .text = "foo",
+                                .location = .{
+                                    .start = .{ .offset = 36, .line = 2, .column = 14 },
+                                    .end = .{ .offset = 39, .line = 2, .column = 17 },
+                                },
+                            },
+                        },
+                        .location = .{
+                            .start = .{ .offset = 26, .line = 2, .column = 4 },
+                            .end = .{ .offset = 39, .line = 2, .column = 17 },
+                        },
+                        .equal_position = .{ .offset = 34, .line = 2, .column = 12 },
+                    },
+                },
+                .{
+                    .block_scope = .{
+                        .statements = &[_]FQLExpression{
+                            .{
+                                .identifier = .{
+                                    .text = "bar",
+                                    .location = .{
+                                        .start = .{ .offset = 54, .line = 4, .column = 8 },
+                                        .end = .{ .offset = 57, .line = 4, .column = 11 },
+                                    },
+                                },
+                            },
+                        },
+                        .location = .{
+                            .start = .{ .offset = 44, .line = 3, .column = 4 },
+                            .end = .{ .offset = 63, .line = 5, .column = 5 },
+                        },
+                    },
+                },
+            },
+            .location = .{
+                .start = .{ .offset = 0, .line = 0, .column = 0 },
+                .end = .{ .offset = 65, .line = 6, .column = 1 },
+            },
+        },
+    });
+
+    try expectParsedExprEqual(
+        \\{
+        \\    let foo = hello?.world
+        \\    (foo ?? "foo")
+        \\}
+    , .{
+        .block_scope = .{
+            .statements = &[_]FQLExpression{
+                .{
+                    .variable_declaration = .{
+                        .name = .{
+                            .text = "foo",
+                            .location = .{
+                                .start = .{ .offset = 10, .line = 1, .column = 8 },
+                                .end = .{ .offset = 13, .line = 1, .column = 11 },
+                            },
+                        },
+                        .value = &FQLExpression{
+                            .field_access = .{
+                                .value = &FQLExpression{
+                                    .identifier = .{
+                                        .text = "hello",
+                                        .location = .{
+                                            .start = .{ .offset = 16, .line = 1, .column = 14 },
+                                            .end = .{ .offset = 21, .line = 1, .column = 19 },
+                                        },
+                                    },
+                                },
+                                .field = .{
+                                    .identifier = .{
+                                        .text = "world",
+                                        .location = .{
+                                            .start = .{ .offset = 23, .line = 1, .column = 21 },
+                                            .end = .{ .offset = 28, .line = 1, .column = 26 },
+                                        },
+                                    },
+                                },
+                                .optional = true,
+                                .location = .{
+                                    .start = .{ .offset = 16, .line = 1, .column = 14 },
+                                    .end = .{ .offset = 28, .line = 1, .column = 26 },
+                                },
+                                .question_position = .{ .offset = 21, .line = 1, .column = 19 },
+                                .dot_position = .{ .offset = 22, .line = 1, .column = 20 },
+                            },
+                        },
+                        .location = .{
+                            .start = .{ .offset = 6, .line = 1, .column = 4 },
+                            .end = .{ .offset = 28, .line = 1, .column = 26 },
+                        },
+                        .equal_position = .{ .offset = 14, .line = 1, .column = 12 },
+                    },
+                },
+                .{
+                    .isolated = .{
+                        .expression = &FQLExpression{
+                            .binary_operation = .{
+                                .lhs = &FQLExpression{
+                                    .identifier = .{
+                                        .text = "foo",
+                                        .location = .{
+                                            .start = .{ .offset = 34, .line = 2, .column = 5 },
+                                            .end = .{ .offset = 37, .line = 2, .column = 8 },
+                                        },
+                                    },
+                                },
+                                .rhs = &FQLExpression{
+                                    .string_literal = .{
+                                        .text = "\"foo\"",
+                                        .location = .{
+                                            .start = .{ .offset = 41, .line = 2, .column = 12 },
+                                            .end = .{ .offset = 46, .line = 2, .column = 17 },
+                                        },
+                                    },
+                                },
+                                .operator = .null_coalescence,
+                                .location = .{
+                                    .start = .{ .offset = 34, .line = 2, .column = 5 },
+                                    .end = .{ .offset = 46, .line = 2, .column = 17 },
+                                },
+                                .operator_position = .{ .offset = 38, .line = 2, .column = 9 },
+                            },
+                        },
+                        .location = .{
+                            .start = .{ .offset = 33, .line = 2, .column = 4 },
+                            .end = .{ .offset = 47, .line = 2, .column = 18 },
+                        },
+                    },
+                },
+            },
+            .location = .{
+                .start = .{ .offset = 0, .line = 0, .column = 0 },
+                .end = .{ .offset = 49, .line = 3, .column = 1 },
+            },
+        },
+    });
+
+    try expectParsedExprEqual(
         \\((x) => x)(
         \\    {
         \\        "hi"
@@ -5588,11 +5782,65 @@ test parseExpression {
             },
         },
     });
+
+    try expectParsedExprEqualNonCanonical(
+        \\foo
+        \\  ?.bar?.
+        \\  baz
+    , .{
+        .field_access = .{
+            .value = &FQLExpression{
+                .field_access = .{
+                    .value = &FQLExpression{
+                        .identifier = .{
+                            .text = "foo",
+                            .location = .{
+                                .start = .{ .offset = 0, .line = 0, .column = 0 },
+                                .end = .{ .offset = 3, .line = 0, .column = 3 },
+                            },
+                        },
+                    },
+                    .field = .{
+                        .identifier = .{
+                            .text = "bar",
+                            .location = .{
+                                .start = .{ .offset = 8, .line = 1, .column = 4 },
+                                .end = .{ .offset = 11, .line = 1, .column = 7 },
+                            },
+                        },
+                    },
+                    .optional = true,
+                    .location = .{
+                        .start = .{ .offset = 0, .line = 0, .column = 0 },
+                        .end = .{ .offset = 11, .line = 1, .column = 7 },
+                    },
+                    .question_position = .{ .offset = 6, .line = 1, .column = 2 },
+                    .dot_position = .{ .offset = 7, .line = 1, .column = 3 },
+                },
+            },
+            .field = .{
+                .identifier = .{
+                    .text = "baz",
+                    .location = .{
+                        .start = .{ .offset = 16, .line = 2, .column = 2 },
+                        .end = .{ .offset = 19, .line = 2, .column = 5 },
+                    },
+                },
+            },
+            .optional = true,
+            .location = .{
+                .start = .{ .offset = 0, .line = 0, .column = 0 },
+                .end = .{ .offset = 19, .line = 2, .column = 5 },
+            },
+            .question_position = .{ .offset = 11, .line = 1, .column = 7 },
+            .dot_position = .{ .offset = 12, .line = 1, .column = 8 },
+        },
+    });
 }
 
 test "walk" {
     {
-        const expr: FQLExpression = .null;
+        const expr: FQLExpression = .{ .null = null };
         var walker = expr.walk(testing.allocator);
         defer walker.deinit();
 
@@ -5604,8 +5852,8 @@ test "walk" {
         const expr: FQLExpression = .{
             .array_literal = .{
                 .elements = &[_]FQLExpression{
-                    .{ .boolean_literal = true },
-                    .{ .boolean_literal = false },
+                    .{ .boolean_literal = .{ .value = true } },
+                    .{ .boolean_literal = .{ .value = false } },
                 },
             },
         };
@@ -5623,8 +5871,8 @@ test "walk" {
         const expr: FQLExpression = .{
             .array_literal = .{
                 .elements = &[_]FQLExpression{
-                    .{ .boolean_literal = true },
-                    .{ .boolean_literal = false },
+                    .{ .boolean_literal = .{ .value = true } },
+                    .{ .boolean_literal = .{ .value = false } },
                 },
             },
         };
@@ -5643,8 +5891,8 @@ test "walk" {
             .object_literal = .{
                 .fields = &[_]FQLExpression.ObjectLiteral.Field{
                     .{
-                        .key = .{ .identifier = "hello" },
-                        .value = &FQLExpression{ .string_literal = "world" },
+                        .key = .{ .identifier = .{ .text = "hello" } },
+                        .value = &FQLExpression{ .string_literal = .{ .text = "world" } },
                     },
                 },
             },
@@ -5661,7 +5909,7 @@ test "walk" {
     {
         const expr: FQLExpression = .{
             .unary_operation = .{
-                .operand = &FQLExpression{ .boolean_literal = false },
+                .operand = &FQLExpression{ .boolean_literal = .{ .value = false } },
                 .operator = .logical_not,
             },
         };
@@ -5677,7 +5925,7 @@ test "walk" {
     {
         const expr: FQLExpression = .{
             .unary_operation = .{
-                .operand = &FQLExpression{ .boolean_literal = false },
+                .operand = &FQLExpression{ .boolean_literal = .{ .value = false } },
                 .operator = .logical_not,
             },
         };
@@ -5693,9 +5941,9 @@ test "walk" {
     {
         const expr: FQLExpression = .{
             .binary_operation = .{
-                .lhs = &FQLExpression{ .string_literal = "foo" },
+                .lhs = &FQLExpression{ .string_literal = .{ .text = "foo" } },
                 .operator = .add,
-                .rhs = &FQLExpression{ .string_literal = "bar" },
+                .rhs = &FQLExpression{ .string_literal = .{ .text = "bar" } },
             },
         };
 
@@ -5711,10 +5959,8 @@ test "walk" {
     {
         const expr: FQLExpression = .{
             .field_access = .{
-                .value = &FQLExpression{ .string_literal = "foo" },
-                .field = .{
-                    .identifier = "length",
-                },
+                .value = &FQLExpression{ .string_literal = .{ .text = "foo" } },
+                .field = .{ .identifier = .{ .text = "length" } },
             },
         };
 
@@ -5729,9 +5975,9 @@ test "walk" {
     {
         const expr: FQLExpression = .{
             .field_access = .{
-                .value = &FQLExpression{ .string_literal = "foo" },
+                .value = &FQLExpression{ .string_literal = .{ .text = "foo" } },
                 .field = .{
-                    .expression = &FQLExpression{ .string_literal = "length" },
+                    .expression = &FQLExpression{ .string_literal = .{ .text = "length" } },
                 },
             },
         };
@@ -5748,9 +5994,9 @@ test "walk" {
     {
         const expr: FQLExpression = .{
             .invocation = .{
-                .function = &FQLExpression{ .identifier = "log" },
+                .function = &FQLExpression{ .identifier = .{ .text = "log" } },
                 .arguments = &[_]FQLExpression{
-                    .{ .string_literal = "foo" },
+                    .{ .string_literal = .{ .text = "foo" } },
                 },
             },
         };
@@ -5767,9 +6013,9 @@ test "walk" {
     {
         const expr: FQLExpression = .{
             .variable_declaration = .{
-                .name = "foo",
+                .name = .{ .text = "foo" },
                 .value = &FQLExpression{
-                    .string_literal = "bar",
+                    .string_literal = .{ .text = "bar" },
                 },
             },
         };
@@ -5784,9 +6030,11 @@ test "walk" {
 
     {
         const expr: FQLExpression = .{
-            .block_scope = &[_]FQLExpression{
-                .{ .string_literal = "foo" },
-                .{ .string_literal = "bar" },
+            .block_scope = .{
+                .statements = &[_]FQLExpression{
+                    .{ .string_literal = .{ .text = "foo" } },
+                    .{ .string_literal = .{ .text = "bar" } },
+                },
             },
         };
 
@@ -5794,16 +6042,16 @@ test "walk" {
         defer walker.deinit();
 
         try testing.expectEqual(&expr, try walker.next());
-        try testing.expectEqual(&expr.block_scope[0], try walker.next());
-        try testing.expectEqual(&expr.block_scope[1], try walker.next());
+        try testing.expectEqual(&expr.block_scope.statements[0], try walker.next());
+        try testing.expectEqual(&expr.block_scope.statements[1], try walker.next());
         try testing.expectEqualDeep(null, try walker.next());
     }
 
     {
         const expr: FQLExpression = .{
             .conditional = .{
-                .condition = &FQLExpression{ .boolean_literal = true },
-                .body = &FQLExpression{ .number_literal = "42" },
+                .condition = &FQLExpression{ .boolean_literal = .{ .value = true } },
+                .body = &FQLExpression{ .number_literal = .{ .text = "42" } },
             },
         };
 
@@ -5819,9 +6067,9 @@ test "walk" {
     {
         const expr: FQLExpression = .{
             .conditional = .{
-                .condition = &FQLExpression{ .identifier = "foo" },
-                .body = &FQLExpression{ .number_literal = "42" },
-                .@"else" = &FQLExpression{ .number_literal = "69" },
+                .condition = &FQLExpression{ .identifier = .{ .text = "foo" } },
+                .body = &FQLExpression{ .number_literal = .{ .text = "42" } },
+                .@"else" = &FQLExpression{ .number_literal = .{ .text = "69" } },
             },
         };
 
@@ -5837,14 +6085,14 @@ test "walk" {
 
     {
         const expr: FQLExpression = .{
-            .isolated = &FQLExpression{ .identifier = "foo" },
+            .isolated = .{ .expression = &FQLExpression{ .identifier = .{ .text = "foo" } } },
         };
 
         var walker = expr.walk(testing.allocator);
         defer walker.deinit();
 
         try testing.expectEqual(&expr, try walker.next());
-        try testing.expectEqual(expr.isolated, try walker.next());
+        try testing.expectEqual(expr.isolated.expression, try walker.next());
         try testing.expectEqualDeep(null, try walker.next());
     }
 
@@ -5852,7 +6100,7 @@ test "walk" {
         const expr: FQLExpression = .{
             .function = .{
                 .parameters = .{ .long = .{} },
-                .body = &FQLExpression{ .string_literal = "deez nuts" },
+                .body = &FQLExpression{ .string_literal = .{ .text = "deez nuts" } },
             },
         };
 
@@ -5867,7 +6115,9 @@ test "walk" {
     {
         const expr: FQLExpression = .{
             .anonymous_field_access = .{
-                .identifier = "foo",
+                .field = .{
+                    .identifier = .{ .text = "foo" },
+                },
             },
         };
 
@@ -5881,7 +6131,9 @@ test "walk" {
     {
         const expr: FQLExpression = .{
             .anonymous_field_access = .{
-                .expression = &FQLExpression{ .string_literal = "foo" },
+                .field = .{
+                    .expression = &FQLExpression{ .string_literal = .{ .text = "foo" } },
+                },
             },
         };
 
@@ -5889,16 +6141,16 @@ test "walk" {
         defer walker.deinit();
 
         try testing.expectEqual(&expr, try walker.next());
-        try testing.expectEqual(expr.anonymous_field_access.expression, try walker.next());
+        try testing.expectEqual(expr.anonymous_field_access.field.expression, try walker.next());
         try testing.expectEqualDeep(null, try walker.next());
     }
 
     {
         const expr: FQLExpression = .{
             .projection = .{
-                .expression = &FQLExpression{ .identifier = "foo" },
+                .expression = &FQLExpression{ .identifier = .{ .text = "foo" } },
                 .fields = &[_]FQLExpression.Projection.Field{
-                    .{ .short = "length" },
+                    .{ .short = .{ .text = "length" } },
                 },
             },
         };
@@ -5914,13 +6166,13 @@ test "walk" {
     {
         const expr: FQLExpression = .{
             .projection = .{
-                .expression = &FQLExpression{ .identifier = "foo" },
+                .expression = &FQLExpression{ .identifier = .{ .text = "foo" } },
                 .fields = &[_]FQLExpression.Projection.Field{
-                    .{ .short = "length" },
+                    .{ .short = .{ .text = "length" } },
                     .{
                         .long = .{
-                            .key = "zero",
-                            .value = &FQLExpression{ .number_literal = "0" },
+                            .key = .{ .text = "zero" },
+                            .value = &FQLExpression{ .number_literal = .{ .text = "0" } },
                         },
                     },
                 },
@@ -5938,14 +6190,16 @@ test "walk" {
 
     {
         const expr: FQLExpression = .{
-            .non_null_assertion = &FQLExpression{ .identifier = "foo" },
+            .non_null_assertion = .{
+                .expression = &FQLExpression{ .identifier = .{ .text = "foo" } },
+            },
         };
 
         var walker = expr.walk(testing.allocator);
         defer walker.deinit();
 
         try testing.expectEqual(&expr, try walker.next());
-        try testing.expectEqual(expr.non_null_assertion, try walker.next());
+        try testing.expectEqual(expr.non_null_assertion.expression, try walker.next());
         try testing.expectEqualDeep(null, try walker.next());
     }
 }

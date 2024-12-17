@@ -7173,7 +7173,7 @@ test parseDefinition {
 test "function walk body" {
     {
         const function = SchemaDefinition.Function{
-            .name = "foo",
+            .name = .{ .text = "foo" },
         };
 
         var walker = function.walkBody(testing.allocator);
@@ -7184,7 +7184,7 @@ test "function walk body" {
 
     {
         const function = SchemaDefinition.Function{
-            .name = "foo",
+            .name = .{ .text = "foo" },
             .body = &[_]FQLExpression{},
         };
 
@@ -7196,10 +7196,10 @@ test "function walk body" {
 
     {
         const function = SchemaDefinition.Function{
-            .name = "foo",
+            .name = .{ .text = "foo" },
             .body = &[_]FQLExpression{
-                .{ .identifier = "hello" },
-                .{ .identifier = "world" },
+                .{ .identifier = .{ .text = "hello" } },
+                .{ .identifier = .{ .text = "world" } },
             },
         };
 
