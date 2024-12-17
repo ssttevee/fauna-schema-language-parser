@@ -1,4 +1,5 @@
 const std = @import("std");
+const util = @import("util.zig");
 const Tokenizer = @import("Tokenizer.zig");
 const sourcemap = @import("sourcemap.zig");
 
@@ -174,6 +175,10 @@ pub fn SharedPtrUnmanaged(comptime T: type) type {
         pub inline fn dupe(self: @This(), _: std.mem.Allocator) !@This() {
             self.counter.* += 1;
             return self;
+        }
+
+        pub inline fn dupeSlice(slice: anytype, allocator: std.mem.Allocator) !@TypeOf(slice) {
+            return try util.slice.deepDupe(allocator, slice);
         }
     };
 }
