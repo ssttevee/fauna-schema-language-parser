@@ -1791,12 +1791,14 @@ pub const SchemaDefinition = union(enum) {
 
         name: TextNode,
         parameters: ?[]const Parameter = null,
+        variadic_parameter: ?Parameter = null,
         return_type: ?FQLType = null,
         body: ?[]const FQLExpression = null,
         location: ?SourceLocation = null,
         function_position: ?Position = null,
         lparen_position: ?Position = null,
         comma_positions: ?[]const Position = null,
+        dot3_position: ?Position = null,
         rparen_position: ?Position = null,
         colon_position: ?Position = null,
         lbrace_position: ?Position = null,
@@ -1820,6 +1822,10 @@ pub const SchemaDefinition = union(enum) {
                 }
 
                 allocator.free(parameters);
+            }
+
+            if (self.variadic_parameter) |variadic_parameter| {
+                variadic_parameter.deinit(allocator);
             }
 
             if (self.body) |exprs| {
@@ -1865,11 +1871,17 @@ pub const SchemaDefinition = union(enum) {
                 fql_type.deinit(allocator);
             };
 
+            const variadic_parameter = if (self.variadic_parameter) |param| try param.dupe(allocator) else null;
+            errdefer if (variadic_parameter) |param| {
+                param.deinit(allocator);
+            };
+
             return .{
                 .alias = alias,
                 .role = role,
                 .name = n,
                 .parameters = parameters,
+                .variadic_parameter = variadic_parameter,
                 .return_type = return_type,
                 .body = try util.slice.deepDupe(allocator, self.body),
                 .location = self.location,
@@ -1878,6 +1890,7 @@ pub const SchemaDefinition = union(enum) {
                 .comma_positions = util.slice.deepDupe(allocator, self.comma_positions) catch unreachable,
                 .rparen_position = self.rparen_position,
                 .colon_position = self.colon_position,
+                .dot3_position = self.dot3_position,
                 .lbrace_position = self.lbrace_position,
             };
         }
@@ -1974,6 +1987,68 @@ pub const SchemaDefinition = union(enum) {
 
                         try param_type.printCanonical(writer);
                     }
+                }
+            }
+
+            if (self.variadic_parameter) |parameter| {
+                if (self.parameters) |other_params| {
+                    if (other_params.len > 0) {
+                        if (self.location) |loc| {
+                            if (self.comma_positions) |commas| {
+                                if (commas.len >= other_params.len) {
+                                    sourcemap.setNextWriteMapping(writer, loc.source, commas[other_params.len - 1], null);
+                                }
+                            }
+                        }
+
+                        try writer.writeByte(',');
+
+                        if (self.location) |loc| {
+                            if (self.comma_positions) |commas| {
+                                if (commas.len >= other_params.len) {
+                                    sourcemap.setNextWriteMapping(writer, loc.source, commas[other_params.len - 1].bump(1), null);
+                                }
+                            }
+                        }
+
+                        try writer.writeByte(' ');
+                    }
+                }
+
+                if (self.location) |loc| {
+                    if (self.dot3_position) |pos| {
+                        sourcemap.setNextWriteMapping(writer, loc.source, pos, null);
+                    }
+                }
+
+                try writer.writeByteNTimes('.', 3);
+
+                if (self.location) |loc| {
+                    if (self.dot3_position) |pos| {
+                        sourcemap.setNextWriteMapping(writer, loc.source, pos.bump(3), null);
+                    }
+                }
+
+                try parameter.name.printCanonical(writer);
+
+                if (parameter.type) |param_type| {
+                    if (parameter.location) |loc| {
+                        if (parameter.colon_position) |pos| {
+                            sourcemap.setNextWriteMapping(writer, loc.source, pos, null);
+                        }
+                    }
+
+                    try writer.writeByte(':');
+
+                    if (parameter.location) |loc| {
+                        if (parameter.colon_position) |pos| {
+                            sourcemap.setNextWriteMapping(writer, loc.source, pos.bump(1), null);
+                        }
+                    }
+
+                    try writer.writeByte(' ');
+
+                    try param_type.printCanonical(writer);
                 }
             }
 
@@ -2662,6 +2737,15 @@ pub const SchemaDefinition = union(enum) {
             };
 
             const Function = union(enum) {
+                const VariadicParameter = struct {
+                    dot3_position: Position,
+                    param: SchemaDefinition.Function.Parameter,
+
+                    fn deinit(self: VariadicParameter, allocator: std.mem.Allocator) void {
+                        self.param.deinit(allocator);
+                    }
+                };
+
                 start: Position,
                 after_name: struct {
                     start_position: Position,
@@ -2676,25 +2760,31 @@ pub const SchemaDefinition = union(enum) {
                     lparen_position: Position,
                     name: TextNode,
                     params: std.ArrayListUnmanaged(SchemaDefinition.Function.Parameter) = .{},
+                    variadic_param: ?VariadicParameter = null,
                     comma_positions: std.ArrayListUnmanaged(Position) = .{},
                     param_state: union(enum) {
                         start,
-                        after_name: TextNode,
-                        before_type: struct { name: TextNode, colon_position: Position, type_parser: FQLType.Parser.Unmanaged = .{} },
+                        after_dot3: Position,
+                        after_name: struct { dot3_position: ?Position = null, name: TextNode },
+                        after_colon: struct { dot3_position: ?Position = null, name: TextNode, colon_position: Position, type_parser: FQLType.Parser.Unmanaged = .{} },
                         end,
                     } = .start,
 
                     fn deinit(self: @This(), allocator: std.mem.Allocator) void {
                         switch (self.param_state) {
-                            .start, .end => {},
-                            .after_name => |n| n.deinit(allocator),
-                            .before_type => |before_type| {
+                            .start, .end, .after_dot3 => {},
+                            .after_name => |after_name| after_name.name.deinit(allocator),
+                            .after_colon => |before_type| {
                                 before_type.name.deinit(allocator);
                                 before_type.type_parser.deinit(allocator);
                             },
                         }
 
                         for (self.params.items) |param| {
+                            param.deinit(allocator);
+                        }
+
+                        if (self.variadic_param) |param| {
                             param.deinit(allocator);
                         }
 
@@ -2711,10 +2801,15 @@ pub const SchemaDefinition = union(enum) {
                     colon_position: Position,
                     name: TextNode,
                     params: []const SchemaDefinition.Function.Parameter,
+                    variadic_param: ?VariadicParameter = null,
                     type_parser: FQLType.Parser.Unmanaged = .{},
 
                     fn deinit(self: @This(), allocator: std.mem.Allocator) void {
                         for (self.params) |param| {
+                            param.deinit(allocator);
+                        }
+
+                        if (self.variadic_param) |param| {
                             param.deinit(allocator);
                         }
 
@@ -2732,6 +2827,7 @@ pub const SchemaDefinition = union(enum) {
                     colon_position: ?Position = null,
                     name: TextNode,
                     params: []const SchemaDefinition.Function.Parameter,
+                    variadic_param: ?VariadicParameter = null,
                     return_type: ?FQLType = null,
 
                     fn deinit(self: @This(), allocator: std.mem.Allocator) void {
@@ -2740,6 +2836,10 @@ pub const SchemaDefinition = union(enum) {
                         }
 
                         for (self.params) |param| {
+                            param.deinit(allocator);
+                        }
+
+                        if (self.variadic_param) |param| {
                             param.deinit(allocator);
                         }
 
@@ -2757,6 +2857,7 @@ pub const SchemaDefinition = union(enum) {
                     lbrace_position: Position,
                     name: TextNode,
                     params: []const SchemaDefinition.Function.Parameter,
+                    variadic_param: ?VariadicParameter = null,
                     return_type: ?FQLType,
                     exprs: std.ArrayListUnmanaged(FQLExpression) = .{},
                     expr_parser: FQLExpression.Parser.Unmanaged = .{},
@@ -2767,6 +2868,10 @@ pub const SchemaDefinition = union(enum) {
                         }
 
                         for (self.params) |param| {
+                            param.deinit(allocator);
+                        }
+
+                        if (self.variadic_param) |param| {
                             param.deinit(allocator);
                         }
 
@@ -4276,8 +4381,10 @@ pub const SchemaDefinition = union(enum) {
                                         .word => |word| {
                                             params.param_state = .{
                                                 .after_name = .{
-                                                    .text = try allocator.dupe(u8, word),
-                                                    .location = loc,
+                                                    .name = .{
+                                                        .text = try allocator.dupe(u8, word),
+                                                        .location = loc,
+                                                    },
                                                 },
                                             };
                                         },
@@ -4285,77 +4392,168 @@ pub const SchemaDefinition = union(enum) {
                                             params.param_state = .end;
                                             return .{ .save = token_with_location };
                                         },
+                                        .dot3 => {
+                                            params.param_state = .{
+                                                .after_dot3 = loc.start,
+                                            };
+                                        },
                                         else => {
-                                            std.log.err("unexpected token: expected word or rparen but got {s}", .{@tagName(token)});
+                                            std.log.err("unexpected token: expected word, dot3 or rparen but got {s}", .{@tagName(token)});
                                             return error.UnexpectedToken;
                                         },
                                     }
                                 },
-                                .after_name => |n| {
+                                .after_dot3 => |p| {
                                     switch (token) {
-                                        .colon => {
+                                        .word => |word| {
                                             params.param_state = .{
-                                                .before_type = .{
-                                                    .name = n,
-                                                    .colon_position = loc.start,
+                                                .after_name = .{
+                                                    .dot3_position = p,
+                                                    .name = .{
+                                                        .text = try allocator.dupe(u8, word),
+                                                        .location = loc,
+                                                    },
                                                 },
                                             };
                                         },
-                                        .rparen, .comma => {
-                                            try params.params.append(allocator, .{
-                                                .name = n,
-                                                .location = n.location,
-                                            });
-                                            params.param_state = .end;
-                                            return .{ .save = token_with_location };
-                                        },
                                         else => {
-                                            std.log.err("unexpected token: expected colon, rparen or comma but got {s}", .{@tagName(token)});
+                                            std.log.err("unexpected token: expected word but got {s}", .{@tagName(token)});
                                             return error.UnexpectedToken;
                                         },
                                     }
                                 },
-                                .before_type => |*before_type| {
-                                    const res = try before_type.type_parser.pushToken(allocator, token_with_location);
-                                    if (res.type) |fql_type| {
-                                        try params.params.append(allocator, .{
-                                            .name = before_type.name,
-                                            .type = fql_type,
-                                            .location = .{
-                                                .source = loc.source,
-                                                .start = before_type.name.location.?.start,
-                                                .end = fql_type.location().?.end,
+                                .after_name => |after_name| {
+                                    if (after_name.dot3_position) |dot3_position| {
+                                        switch (token) {
+                                            .colon => {
+                                                params.param_state = .{
+                                                    .after_colon = .{
+                                                        .dot3_position = dot3_position,
+                                                        .name = after_name.name,
+                                                        .colon_position = loc.start,
+                                                    },
+                                                };
                                             },
-                                            .colon_position = before_type.colon_position,
-                                        });
+                                            .rparen => {
+                                                try params.params.append(allocator, .{
+                                                    .name = after_name.name,
+                                                    .location = after_name.name.location,
+                                                });
+                                                params.param_state = .end;
+                                                return .{ .save = token_with_location };
+                                            },
+                                            else => {
+                                                std.log.err("unexpected token: expected colon or rparen but got {s}", .{@tagName(token)});
+                                                return error.UnexpectedToken;
+                                            },
+                                        }
+                                    } else {
+                                        switch (token) {
+                                            .colon => {
+                                                params.param_state = .{
+                                                    .after_colon = .{
+                                                        .dot3_position = after_name.dot3_position,
+                                                        .name = after_name.name,
+                                                        .colon_position = loc.start,
+                                                    },
+                                                };
+                                            },
+                                            .rparen, .comma => {
+                                                try params.params.append(allocator, .{
+                                                    .name = after_name.name,
+                                                    .location = after_name.name.location,
+                                                });
+                                                params.param_state = .end;
+                                                return .{ .save = token_with_location };
+                                            },
+                                            else => {
+                                                std.log.err("unexpected token: expected colon, rparen or comma but got {s}", .{@tagName(token)});
+                                                return error.UnexpectedToken;
+                                            },
+                                        }
+                                    }
+                                },
+                                .after_colon => |*after_colon| {
+                                    const res = try after_colon.type_parser.pushToken(allocator, token_with_location);
+                                    if (res.type) |fql_type| {
+                                        if (after_colon.dot3_position) |dot3_position| {
+                                            params.variadic_param = .{
+                                                .dot3_position = dot3_position,
+                                                .param = .{
+                                                    .name = after_colon.name,
+                                                    .type = fql_type,
+                                                    .location = .{
+                                                        .source = loc.source,
+                                                        .start = after_colon.name.location.?.start,
+                                                        .end = fql_type.location().?.end,
+                                                    },
+                                                    .colon_position = after_colon.colon_position,
+                                                },
+                                            };
+                                        } else {
+                                            try params.params.append(allocator, .{
+                                                .name = after_colon.name,
+                                                .type = fql_type,
+                                                .location = .{
+                                                    .source = loc.source,
+                                                    .start = after_colon.name.location.?.start,
+                                                    .end = fql_type.location().?.end,
+                                                },
+                                                .colon_position = after_colon.colon_position,
+                                            });
+                                        }
+
                                         params.param_state = .end;
                                     }
 
                                     return .{ .save = res.save };
                                 },
                                 .end => {
-                                    switch (token) {
-                                        .comma => {
-                                            try params.comma_positions.append(allocator, loc.start);
-                                            params.param_state = .start;
-                                        },
-                                        .rparen => {
-                                            const new_state: State.Function = .{
-                                                .before_body = .{
-                                                    .name = params.name,
-                                                    .params = try params.params.toOwnedSlice(allocator),
-                                                    .start_position = params.start_position,
-                                                    .lparen_position = params.lparen_position,
-                                                    .comma_positions = try params.comma_positions.toOwnedSlice(allocator),
-                                                    .rparen_position = loc.start,
-                                                },
-                                            };
-                                            function.* = new_state;
-                                        },
-                                        else => {
-                                            std.log.err("unexpected token: expected rparen or comma but got {s}", .{@tagName(token)});
-                                            return error.UnexpectedToken;
-                                        },
+                                    if (params.variadic_param) |variadic_param| {
+                                        switch (token) {
+                                            .rparen => {
+                                                const new_state: State.Function = .{
+                                                    .before_body = .{
+                                                        .name = params.name,
+                                                        .params = try params.params.toOwnedSlice(allocator),
+                                                        .start_position = params.start_position,
+                                                        .lparen_position = params.lparen_position,
+                                                        .comma_positions = try params.comma_positions.toOwnedSlice(allocator),
+                                                        .rparen_position = loc.start,
+                                                        .variadic_param = variadic_param,
+                                                    },
+                                                };
+                                                function.* = new_state;
+                                            },
+                                            else => {
+                                                std.log.err("unexpected token: expected rparen but got {s}", .{@tagName(token)});
+                                                return error.UnexpectedToken;
+                                            },
+                                        }
+                                    } else {
+                                        switch (token) {
+                                            .comma => {
+                                                try params.comma_positions.append(allocator, loc.start);
+                                                params.param_state = .start;
+                                            },
+                                            .rparen => {
+                                                const new_state: State.Function = .{
+                                                    .before_body = .{
+                                                        .name = params.name,
+                                                        .params = try params.params.toOwnedSlice(allocator),
+                                                        .start_position = params.start_position,
+                                                        .lparen_position = params.lparen_position,
+                                                        .comma_positions = try params.comma_positions.toOwnedSlice(allocator),
+                                                        .rparen_position = loc.start,
+                                                    },
+                                                };
+                                                function.* = new_state;
+                                            },
+                                            else => {
+                                                std.log.err("unexpected token: expected rparen or comma but got {s}", .{@tagName(token)});
+                                                return error.UnexpectedToken;
+                                            },
+                                        }
                                     }
                                 },
                             }
@@ -4367,6 +4565,7 @@ pub const SchemaDefinition = union(enum) {
                                     .before_body = .{
                                         .name = return_type.name,
                                         .params = return_type.params,
+                                        .variadic_param = return_type.variadic_param,
                                         .return_type = fql_type,
                                         .start_position = return_type.start_position,
                                         .lparen_position = return_type.lparen_position,
@@ -4386,6 +4585,7 @@ pub const SchemaDefinition = union(enum) {
                                     .return_type = .{
                                         .name = before_body.name,
                                         .params = before_body.params,
+                                        .variadic_param = before_body.variadic_param,
                                         .start_position = before_body.start_position,
                                         .lparen_position = before_body.lparen_position,
                                         .comma_positions = before_body.comma_positions,
@@ -4399,6 +4599,7 @@ pub const SchemaDefinition = union(enum) {
                                     .body = .{
                                         .name = before_body.name,
                                         .params = before_body.params,
+                                        .variadic_param = before_body.variadic_param,
                                         .return_type = before_body.return_type,
                                         .start_position = before_body.start_position,
                                         .lparen_position = before_body.lparen_position,
@@ -4424,6 +4625,8 @@ pub const SchemaDefinition = union(enum) {
                                     .function = .{
                                         .name = body.name,
                                         .parameters = body.params,
+                                        .variadic_parameter = if (body.variadic_param) |param| param.param else null,
+                                        .dot3_position = if (body.variadic_param) |param| param.dot3_position else null,
                                         .return_type = body.return_type,
                                         .body = try body.exprs.toOwnedSlice(allocator),
                                         .location = .{
