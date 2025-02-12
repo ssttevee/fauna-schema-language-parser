@@ -41,11 +41,11 @@ pub fn ManagedParser(comptime UnmanagedParser: type) type {
                 const token = try it.nextToken(allocator);
                 defer token.deinit(allocator);
 
-                // std.debug.print("{} pushing token {s}\n", .{ T, @tagName(token) });
+                // std.debug.print("{} pushing token {s} {s}\n", .{ T, @tagName(token.token), token.token.bytes() });
 
                 const result = try parser.pushToken(token);
                 if (result.save) |save| {
-                    // std.debug.print("{} saving token {s}\n", .{ T, @tagName(save) });
+                    // std.debug.print("{} saving token {s} {s}\n", .{ T, @tagName(save.token), token.token.bytes() });
 
                     it.saveToken(try save.dupe(allocator));
                 }

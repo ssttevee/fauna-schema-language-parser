@@ -104,6 +104,18 @@ pub const Token = union(enum) {
             else => self,
         };
     }
+
+    pub fn bytes(self: Token) []const u8 {
+        switch (self) {
+            inline else => |v| {
+                if (@TypeOf(v) == []const u8) {
+                    return v;
+                }
+
+                return "";
+            },
+        }
+    }
 };
 
 const WordPrefix = union(enum) {
@@ -452,11 +464,9 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
     }
 
     const prefix = WordPrefix.fromChar(chars[0]);
-    if (prefix != .none) {
-        chars.ptr += prefix.len();
-        chars.len -= prefix.len();
-        self.consumeBytes(prefix.len());
-    }
+    const prefix_len = prefix.len();
+    chars.ptr += prefix_len;
+    chars.len -= prefix_len;
 
     if (util.slice.indexOfNoneFn(chars, isIdentifierChar)) |index| {
         if (index == 0) {
@@ -467,17 +477,16 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
     }
 
     if (chars.len > 0) {
-        if (prefix == .at) {
-            self.consumeBytes(chars.len);
-            return .{ .annotation = try allocator.dupe(u8, chars) };
-        }
-
-        if (!self.is_eof and chars.len == self.buf_end - self.buf_start) {
+        if (!self.is_eof and chars.len == self.buf_end - self.buf_start - prefix_len) {
             return error.NeedMoreData;
         }
 
-        self.consumeBytes(chars.len);
-        return .{ .word = try allocator.dupe(u8, chars) };
+        self.consumeBytes(prefix_len + chars.len);
+
+        return switch (prefix) {
+            .at => .{ .annotation = try allocator.dupe(u8, chars) },
+            .none => .{ .word = try allocator.dupe(u8, chars) },
+        };
     }
 
     std.log.err("found unexpected token: {d} \"{s}{s}\"", .{ chars.len + prefix.len(), prefix.toString(), chars });
