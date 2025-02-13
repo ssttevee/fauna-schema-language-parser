@@ -4042,7 +4042,7 @@ pub const SchemaDefinition = union(enum) {
                                             inline else => |kw| role.member_state = @unionInit(@TypeOf(role.member_state.?), @tagName(kw), loc.start),
                                         }
                                     } else {
-                                        std.log.err("unexpected token: word to equal \"membership\" or \"privileges\" but got {s}", .{word});
+                                        std.log.err("unexpected token: expected word to equal \"membership\" or \"privileges\" but got {s}", .{word});
                                         return error.UnexpectedToken;
                                     }
                                 },
@@ -4642,6 +4642,9 @@ pub const SchemaDefinition = union(enum) {
                                         .lbrace_position = body.lbrace_position,
                                     },
                                 });
+                            } else if (body.expr_parser.state == .empty and body.expr_parser.parent == null and token == .eof) {
+                                std.log.err("unexpected token: eof", .{});
+                                return error.UnexpectedToken;
                             } else {
                                 const res = try body.expr_parser.pushToken(allocator, token_with_location);
                                 if (res.expr) |expr| {
