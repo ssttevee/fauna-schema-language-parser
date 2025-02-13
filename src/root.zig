@@ -75,6 +75,8 @@ pub const QueryTree = struct {
 
     pub fn parse(allocator: std.mem.Allocator, reader: std.io.AnyReader, filename: []const u8) !QueryTree {
         const duped_filename = try allocator.dupe(u8, filename);
+        errdefer allocator.free(duped_filename);
+
         var it = Tokenizer.TokenIterator.init(reader, duped_filename);
         defer it.deinit(allocator);
 
@@ -163,6 +165,8 @@ pub const SchemaTree = struct {
 
     pub fn parse(allocator: std.mem.Allocator, reader: std.io.AnyReader, filename: []const u8) !SchemaTree {
         const duped_filename = try allocator.dupe(u8, filename);
+        errdefer allocator.free(duped_filename);
+
         var it = Tokenizer.TokenIterator.init(reader, duped_filename);
         defer it.deinit(allocator);
 
