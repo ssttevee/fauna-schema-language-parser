@@ -2289,8 +2289,8 @@ pub const FQLExpression = union(enum) {
             const token = token_with_location.token;
             const loc = token_with_location.location.?;
 
-            // std.debug.print("expression parser state: {s} {s}\n", .{ @tagName(self.state), if (self.parent) |p| @tagName(p.state) else "" });
-            // std.debug.print("got token: {any}\n", .{token});
+            std.debug.print("expression parser state: {s} {s}\n", .{ @tagName(self.state), if (self.parent) |p| @tagName(p.state) else "" });
+            std.debug.print("got token: {any}\n", .{token});
 
             if (token == .comment_block or token == .comment_line) {
                 return .{};
@@ -2975,44 +2975,52 @@ pub const FQLExpression = union(enum) {
                             return .{};
                         },
                         .lbracket => {
-                            self.state = .{
-                                .field_access = .{
-                                    .value = expr,
-                                    .lbracket_position = loc.start,
-                                },
-                            };
-                            try self.startChildState(allocator);
-                            return .{};
+                            if (!end.eol) {
+                                self.state = .{
+                                    .field_access = .{
+                                        .value = expr,
+                                        .lbracket_position = loc.start,
+                                    },
+                                };
+                                try self.startChildState(allocator);
+                                return .{};
+                            }
                         },
                         .lparen => {
-                            self.state = .{
-                                .invocation = .{
-                                    .function = expr,
-                                    .lparen_position = loc.start,
-                                },
-                            };
+                            if (!end.eol) {
+                                self.state = .{
+                                    .invocation = .{
+                                        .function = expr,
+                                        .lparen_position = loc.start,
+                                    },
+                                };
+                            }
                             return .{};
                         },
                         .lbrace => {
-                            self.state = .{
-                                .projection = .{
-                                    .expression = expr,
-                                    .lbrace_position = loc.start,
-                                },
-                            };
+                            if (!end.eol) {
+                                self.state = .{
+                                    .projection = .{
+                                        .expression = expr,
+                                        .lbrace_position = loc.start,
+                                    },
+                                };
+                            }
                             return .{};
                         },
                         .bang => {
-                            self.finalizeExpr(.{
-                                .non_null_assertion = .{
-                                    .expression = try util.mem.createCopy(FQLExpression, allocator, &expr),
-                                    .location = .{
-                                        .source = loc.source,
-                                        .start = expr.location().?.start,
-                                        .end = loc.end,
+                            if (!end.eol) {
+                                self.finalizeExpr(.{
+                                    .non_null_assertion = .{
+                                        .expression = try util.mem.createCopy(FQLExpression, allocator, &expr),
+                                        .location = .{
+                                            .source = loc.source,
+                                            .start = expr.location().?.start,
+                                            .end = loc.end,
+                                        },
                                     },
-                                },
-                            });
+                                });
+                            }
                             return .{};
                         },
                         else => {
