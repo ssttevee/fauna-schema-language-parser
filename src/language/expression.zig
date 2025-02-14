@@ -2975,44 +2975,52 @@ pub const FQLExpression = union(enum) {
                             return .{};
                         },
                         .lbracket => {
-                            self.state = .{
-                                .field_access = .{
-                                    .value = expr,
-                                    .lbracket_position = loc.start,
-                                },
-                            };
-                            try self.startChildState(allocator);
-                            return .{};
+                            if (!end.eol) {
+                                self.state = .{
+                                    .field_access = .{
+                                        .value = expr,
+                                        .lbracket_position = loc.start,
+                                    },
+                                };
+                                try self.startChildState(allocator);
+                                return .{};
+                            }
                         },
                         .lparen => {
-                            self.state = .{
-                                .invocation = .{
-                                    .function = expr,
-                                    .lparen_position = loc.start,
-                                },
-                            };
+                            if (!end.eol) {
+                                self.state = .{
+                                    .invocation = .{
+                                        .function = expr,
+                                        .lparen_position = loc.start,
+                                    },
+                                };
+                            }
                             return .{};
                         },
                         .lbrace => {
-                            self.state = .{
-                                .projection = .{
-                                    .expression = expr,
-                                    .lbrace_position = loc.start,
-                                },
-                            };
+                            if (!end.eol) {
+                                self.state = .{
+                                    .projection = .{
+                                        .expression = expr,
+                                        .lbrace_position = loc.start,
+                                    },
+                                };
+                            }
                             return .{};
                         },
                         .bang => {
-                            self.finalizeExpr(.{
-                                .non_null_assertion = .{
-                                    .expression = try util.mem.createCopy(FQLExpression, allocator, &expr),
-                                    .location = .{
-                                        .source = loc.source,
-                                        .start = expr.location().?.start,
-                                        .end = loc.end,
+                            if (!end.eol) {
+                                self.finalizeExpr(.{
+                                    .non_null_assertion = .{
+                                        .expression = try util.mem.createCopy(FQLExpression, allocator, &expr),
+                                        .location = .{
+                                            .source = loc.source,
+                                            .start = expr.location().?.start,
+                                            .end = loc.end,
+                                        },
                                     },
-                                },
-                            });
+                                });
+                            }
                             return .{};
                         },
                         else => {
