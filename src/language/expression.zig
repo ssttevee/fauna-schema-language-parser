@@ -3056,7 +3056,7 @@ pub const FQLExpression = union(enum) {
                     }
 
                     if (self.parent) |parent| {
-                        if (parent.state == .invocation and token == .eol) {
+                        if ((parent.state == .invocation or parent.state == .array_literal) and token == .eol) {
                             return .{};
                         }
 
@@ -3475,6 +3475,90 @@ fn expectParsedExprEqual(str: []const u8, expected: FQLExpression) !void {
 
 fn expectParsedExprEqualNonCanonical(str: []const u8, expected: FQLExpression) !void {
     try expectParsedExprEqualMaybeCanonical(str, expected, false);
+}
+
+test "multiline field access in array literal" {
+    try expectParsedExprEqualNonCanonical(
+        \\[
+        \\  foo
+        \\    .bar
+        \\]
+    ,
+        .{
+            .array_literal = .{
+                .elements = &.{
+                    FQLExpression{
+                        .field_access = .{
+                            .value = &FQLExpression{
+                                .identifier = .{
+                                    .text = "foo",
+                                    .location = .{
+                                        .start = .{
+                                            .offset = 4,
+                                            .line = 1,
+                                            .column = 2,
+                                        },
+                                        .end = .{
+                                            .offset = 7,
+                                            .line = 1,
+                                            .column = 5,
+                                        },
+                                    },
+                                },
+                            },
+                            .field = .{
+                                .identifier = .{
+                                    .text = "bar",
+                                    .location = .{
+                                        .start = .{
+                                            .offset = 13,
+                                            .line = 2,
+                                            .column = 5,
+                                        },
+                                        .end = .{
+                                            .offset = 16,
+                                            .line = 2,
+                                            .column = 8,
+                                        },
+                                    },
+                                },
+                            },
+                            .location = .{
+                                .start = .{
+                                    .offset = 4,
+                                    .line = 1,
+                                    .column = 2,
+                                },
+                                .end = .{
+                                    .offset = 16,
+                                    .line = 2,
+                                    .column = 8,
+                                },
+                            },
+                            .dot_position = .{
+                                .offset = 12,
+                                .line = 2,
+                                .column = 4,
+                            },
+                        },
+                    },
+                },
+                .comma_positions = &.{},
+                .location = .{
+                    .start = .{
+                        .offset = 0,
+                        .line = 0,
+                        .column = 0,
+                    },
+                    .end = .{
+                        .offset = 18,
+                        .line = 3,
+                        .column = 1,
+                    },
+                },
+            },
+        },
+    );
 }
 
 test "anonymous array field access expression" {
