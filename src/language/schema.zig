@@ -4425,6 +4425,7 @@ pub const SchemaDefinition = union(enum) {
                                 .after_name => |after_name| {
                                     if (after_name.dot3_position) |dot3_position| {
                                         switch (token) {
+                                            .eol => {},
                                             .colon => {
                                                 params.param_state = .{
                                                     .after_colon = .{
@@ -4449,6 +4450,7 @@ pub const SchemaDefinition = union(enum) {
                                         }
                                     } else {
                                         switch (token) {
+                                            .eol => {},
                                             .colon => {
                                                 params.param_state = .{
                                                     .after_colon = .{
@@ -4511,6 +4513,7 @@ pub const SchemaDefinition = union(enum) {
                                 .end => {
                                     if (params.variadic_param) |variadic_param| {
                                         switch (token) {
+                                            .eol => {},
                                             .rparen => {
                                                 const new_state: State.Function = .{
                                                     .before_body = .{
@@ -4532,6 +4535,7 @@ pub const SchemaDefinition = union(enum) {
                                         }
                                     } else {
                                         switch (token) {
+                                            .eol => {},
                                             .comma => {
                                                 try params.comma_positions.append(allocator, loc.start);
                                                 params.param_state = .start;
