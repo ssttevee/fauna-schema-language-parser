@@ -2212,14 +2212,7 @@ pub const FQLExpression = union(enum) {
 
             const AnonymousFieldAccess = struct {
                 start_position: Position,
-                key: ?FQLExpression = null,
                 lbracket_position: ?Position = null,
-
-                fn deinit(self: State.AnonymousFieldAccess, allocator: std.mem.Allocator) void {
-                    if (self.key) |key| {
-                        key.deinit(allocator);
-                    }
-                }
             };
 
             const UnaryOperation = struct {
@@ -2253,7 +2246,7 @@ pub const FQLExpression = union(enum) {
             fn deinit(self: @This(), allocator: std.mem.Allocator) void {
                 // std.debug.print("deinit FQLExpression.Parser.Unmanaged.State.{s}\n", .{@tagName(self)});
                 switch (self) {
-                    .empty, .unary_operation => {},
+                    .empty, .unary_operation, .anonymous_field_access => {},
                     .end => |end| end.expression.deinit(allocator),
                     inline else => |v| v.deinit(allocator),
                 }
@@ -2637,53 +2630,30 @@ pub const FQLExpression = union(enum) {
                         return error.UnexpectedToken;
                     },
                 },
-                .anonymous_field_access => |anonymous_field_access| {
-                    if (anonymous_field_access.key) |key| {
-                        switch (token) {
-                            .rbracket => {
-                                self.finalizeExpr(.{
-                                    .anonymous_field_access = .{
-                                        .field = .{
-                                            .expression = try util.mem.createCopy(FQLExpression, allocator, &key),
-                                        },
-                                        .location = .{
-                                            .source = loc.source,
-                                            .start = anonymous_field_access.start_position,
-                                            .end = loc.end,
-                                        },
-                                        .lbracket_position = anonymous_field_access.lbracket_position,
+                .anonymous_field_access => |*anonymous_field_access| {
+                    switch (token) {
+                        .word => |word| {
+                            self.finalizeExpr(.{
+                                .anonymous_field_access = .{
+                                    .field = .{
+                                        .identifier = .{ .text = try allocator.dupe(u8, word), .location = loc },
                                     },
-                                });
-                            },
-                            else => {
-                                std.log.err("unexpected token: expected rbracket but got {s}", .{@tagName(token)});
-                                return error.UnexpectedToken;
-                            },
-                        }
-                    } else {
-                        switch (token) {
-                            .word => |word| {
-                                self.finalizeExpr(.{
-                                    .anonymous_field_access = .{
-                                        .field = .{
-                                            .identifier = .{ .text = try allocator.dupe(u8, word), .location = loc },
-                                        },
-                                        .location = .{
-                                            .source = loc.source,
-                                            .start = anonymous_field_access.start_position,
-                                            .end = loc.end,
-                                        },
+                                    .location = .{
+                                        .source = loc.source,
+                                        .start = anonymous_field_access.start_position,
+                                        .end = loc.end,
                                     },
-                                });
-                            },
-                            .lbracket => {
-                                try self.startChildState(allocator);
-                            },
-                            else => {
-                                std.log.err("unexpected token: expected word or lbracket but got {s}", .{@tagName(token)});
-                                return error.UnexpectedToken;
-                            },
-                        }
+                                },
+                            });
+                        },
+                        .lbracket => {
+                            anonymous_field_access.lbracket_position = loc.start;
+                            try self.startChildState(allocator);
+                        },
+                        else => {
+                            std.log.err("unexpected token: expected word or lbracket but got {s}", .{@tagName(token)});
+                            return error.UnexpectedToken;
+                        },
                     }
                 },
                 .projection => |*projection| switch (projection.state) {
@@ -3213,6 +3183,10 @@ pub const FQLExpression = union(enum) {
                                 });
                             },
                             .field_access => |field_access| {
+                                if (field_access.lbracket_position == null) {
+                                    std.debug.panic("invalid parser parent state: field_access missing lbracket", .{});
+                                }
+
                                 if (token != .rbracket) {
                                     std.log.err("unexpected token: expected rbracket but got {s}", .{@tagName(token)});
                                     return error.UnexpectedToken;
@@ -3231,6 +3205,30 @@ pub const FQLExpression = union(enum) {
                                         .question_position = field_access.question_position,
                                         .dot_position = field_access.dot_position,
                                         .lbracket_position = field_access.lbracket_position,
+                                    },
+                                });
+
+                                return .{};
+                            },
+                            .anonymous_field_access => |*anonymous_field_access| {
+                                if (anonymous_field_access.lbracket_position == null) {
+                                    std.debug.panic("invalid parser parent state: anonymous_field_access missing lbracket", .{});
+                                }
+
+                                if (token != .rbracket) {
+                                    std.log.err("unexpected token: expected rbracket but got {s}", .{@tagName(token)});
+                                    return error.UnexpectedToken;
+                                }
+
+                                parent.finalizeExpr(.{
+                                    .anonymous_field_access = .{
+                                        .field = .{ .expression = try util.mem.createCopy(FQLExpression, allocator, &expr) },
+                                        .location = .{
+                                            .source = loc.source,
+                                            .start = anonymous_field_access.start_position,
+                                            .end = loc.end,
+                                        },
+                                        .lbracket_position = anonymous_field_access.lbracket_position,
                                     },
                                 });
 
@@ -3477,6 +3475,52 @@ fn expectParsedExprEqual(str: []const u8, expected: FQLExpression) !void {
 
 fn expectParsedExprEqualNonCanonical(str: []const u8, expected: FQLExpression) !void {
     try expectParsedExprEqualMaybeCanonical(str, expected, false);
+}
+
+test "anonymous array field access expression" {
+    try expectParsedExprEqual(
+        ".[0]",
+        .{
+            .anonymous_field_access = .{
+                .field = .{
+                    .expression = &FQLExpression{
+                        .number_literal = .{
+                            .text = "0",
+                            .location = .{
+                                .start = .{
+                                    .offset = 2,
+                                    .line = 0,
+                                    .column = 2,
+                                },
+                                .end = .{
+                                    .offset = 3,
+                                    .line = 0,
+                                    .column = 3,
+                                },
+                            },
+                        },
+                    },
+                },
+                .location = .{
+                    .start = .{
+                        .offset = 0,
+                        .line = 0,
+                        .column = 0,
+                    },
+                    .end = .{
+                        .offset = 4,
+                        .line = 0,
+                        .column = 4,
+                    },
+                },
+                .lbracket_position = .{
+                    .offset = 1,
+                    .line = 0,
+                    .column = 1,
+                },
+            },
+        },
+    );
 }
 
 test parseExpression {

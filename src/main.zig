@@ -57,7 +57,7 @@ pub fn main() !void {
     };
     defer infile.close();
 
-    var it = fauna.TokenIterator.init(infile.reader().any());
+    var it = fauna.TokenIterator.init(infile.reader().any(), filename);
     defer it.deinit(allocator);
 
     while (fauna.SchemaDefinition.parse(allocator, &it) catch |err| {
