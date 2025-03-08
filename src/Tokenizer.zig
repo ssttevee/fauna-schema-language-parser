@@ -417,6 +417,9 @@ pub fn next(self: *Tokenizer, allocator: std.mem.Allocator) !?Token {
                 self.consumeBytes(pos + 1);
                 return .{ .string = try allocator.dupe(u8, chars[0 .. pos + 1]) };
             }
+
+            // the found quote is after the eol
+            return error.UnclosedString;
         } else if (eol_pos == null) {
             // reach end of buf without finding a matching quote or an eol
             return error.NeedMoreData;
@@ -597,6 +600,15 @@ fn expectNextTokenEqualDeep(it: *TokenIterator, expected: Token, start: [3]u64, 
     try testing.expectEqual(end[0], token.location.?.end.offset);
     try testing.expectEqual(end[1], token.location.?.end.line);
     try testing.expectEqual(end[2], token.location.?.end.column);
+}
+
+test "parse unclosed string" {
+    var stream = std.io.fixedBufferStream(
+        \\"asdf
+        \\"
+    );
+    var it = TokenIterator.init(stream.reader().any(), null);
+    try testing.expectEqualDeep(error.UnclosedString, it.next(testing.allocator));
 }
 
 test "read token" {
